@@ -1,0 +1,71 @@
+1)How should food options be diversified in anticipation of peak weekend sales driven by ideal beach weather in Miami?
+
+Food Options Diversification for Peak Weekend Sales
+Executive Summary: Analysis of 20 product categories reveals high sales potential for perishable items like Salad Kits, Desserts, and Ice Cream, which collectively contribute significant revenue. Non-perishable and non-food items show lower unit sales but may complement perishable offerings. No weather-driven demand data is available, so diversification should focus on historical sales trends.
+
+Product Sales Data
+Category	Product	Total Units	Revenue
+Perishable	Salad Kits	573	$12,493.50
+QSR	Desserts	564	$14,376.00
+Perishable	Lettuce	510	$6,338.40
+Perishable	Milk	372	$8,208.00
+Perishable	Ice Cream	333	$10,641.00
+Perishable	Bacon	294	$13,467.00
+Non-Food	Firewood	276	$4,983.00
+Non-Food	Disposable Dishware	273	$3,603.00
+Non-Perishable	Canned Soup	252	$1,128.00
+Perishable	Tomatoes	231	$3,448.50
+Non-Perishable	Bottled Water	228	$495.00
+Non-Food	Facial Tissues	222	$1,134.00
+Non-Food	Hand & Body Lotion	174	$2,337.00
+None	Total Heaters	171	$6,408.00
+None	Total Sandals	168	$2,485.20
+Non-Perishable	Potato Chips	147	$1,428.00
+Non-Food	Allergy Relief	144	$2,490.00
+Non-Perishable	Baked Beans	123	$537.00
+None	Total Fleece	117	$1,041.15
+None	Home Improvement Sector	114	$4,887.00
+Key Insights
+Top Revenue Drivers: Salad Kits ($12,493.50), Desserts ($14,376.00), and Ice Cream ($10,641.00) are the highest revenue-generating items.
+High Unit Sales: Perishable items dominate unit sales, with Salad Kits (573 units) and Lettuce (510 units) leading.
+Complementary Non-Food Items: Disposable Dishware (273 units) and Firewood (276 units) could support outdoor dining or beach activities.
+Low Revenue Items: Non-perishable items like Bottled Water ($495.00) and Baked Beans ($537.00) contribute minimal revenue but may still be essential for variety.
+Recommendations
+Focus on Perishable Items:
+
+Increase inventory of Salad Kits, Desserts, and Ice Cream to meet anticipated demand.
+Ensure adequate stock of complementary items like Lettuce and Tomatoes for meal preparation.
+Promote Non-Food Essentials:
+
+Highlight Disposable Dishware and Firewood as part of outdoor dining or beach packages.
+Offer promotions bundling these with high-demand perishable items.
+Diversify Non-Perishable Offerings:
+
+Expand options for snacks like Potato Chips and Baked Beans to cater to casual beachgoers.
+Stock additional beverages beyond Bottled Water to increase revenue potential.
+Monitor Weather Trends:
+
+Although no weather-driven demand data is available, prepare for potential surges by maintaining flexible inventory levels.
+Use historical sales data to anticipate peak demand periods.
+By implementing these strategies, the product mix can be optimized to capitalize on peak weekend sales driven by ideal beach weather in Miami.
+
+SELECT ph.category, ph.product, 
+       SUM(s.sales_units) AS total_units,
+       SUM(s.sales_units * s.total_amount) AS revenue
+FROM sales s
+JOIN product_hierarchy ph ON s.product_code = ph.product_id
+JOIN location l ON s.store_code = l.location
+JOIN calendar c ON s.transaction_date = c.end_date
+JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+WHERE l.market ILIKE '%miami%'
+  AND w.tmax_f BETWEEN 75 AND 90  -- Ideal temperature range
+  AND w.precip_in < 0.3  -- Low precipitation
+  AND w.heatwave_flag = false  -- No heatwave
+  AND w.heavy_rain_flag = false  -- No heavy rain
+GROUP BY ph.category, ph.product
+ORDER BY total_units DESC
+LIMIT 20;
+
+
+testing team comment:
+It's like filtering records for the ideal beach weather this week and last week we are going to compare in sales and wherever we are getting uplift that we recommend.

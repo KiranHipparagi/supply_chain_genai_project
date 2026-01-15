@@ -1,0 +1,149 @@
+CFO Logic Document
+
+Methodology Overview:
+Adjusted Velocity  
+	Definition: The rate at which a product is expected to sell per day, after applying weather adjustments.
+	Formula: Adjusted Velocity=Daily Sales Velocity×(1+Pct vs Normal)
+	Unit of measure: Units per day.
+	Purpose: Used to forecast demand at the product level, showing how quickly inventory is expected to move under current conditions.
+Adjusted Demand
+	Definition: The total expected demand for a product or region over a defined period (e.g., a week), after applying weather adjustments.
+	Formula: Adjusted Demand=   Average 4Week Sales×(1+PctvsNormal)
+	Unit of measure: Units over the week (or period).
+	Purpose: Used to compare against current stock levels to identify overstock or understock conditions.
+Daily Sales Velocity
+	Definition: The average number of units sold per day, based on the past 28 days of sales.
+	Formula:
+"Daily Sales Velocity"="Total Sales in Last 28 Days" /28
+	Unit of measure: Units per day.
+	Purpose: Establishes a baseline selling speed for each product, used as the foundation for demand forecasting.
+Stockout Loss (per product)
+	Definition: The number of units of unmet demand when expected sales exceed available stock.
+	Formula:
+"Loss Units"=max⁡(0,"  "("Adjusted Demand or Adjusted Velocity × 7")-"Current Stock (Week End)")
+	Unit of measure: Units lost (unmet demand).
+	Purpose: Quantifies missed sales opportunities due to insufficient inventory.
+
+
+
+Regional Performance and Inventory Insights
+
+	Top Region by Week‑on‑Week Sales Unit Change (current week vs previous week)
+Reasoning:
+The week‑on‑week percentage change was calculated by comparing total sales units between the previous weekend and the current weekend using a sales dataset.
+Formula:
+week-on-week % change:  ( curr_sales_units− prev_sales_units) ×100 / prev_sales_units
+
+Response: 
+For the period between the previous weekend and the current weekend, the region maintained stable sales with no change in sales units compared to the prior weekend. This indicates consistent demand and effective inventory alignment, reflecting steady performance week over week.
+
+
+	Sales Uplift vs Historical Average for current weekend
+Reasoning:
+The analysis compares current weekend sales against the four‑week historical average. This highlights whether demand in the current week is stronger, weaker, or stable compared to typical performance. The difference between the two values represents the sales uplift or decline, which helps identify demand shifts influenced by external factors such as weather.
+Formula:
+Sales Uplift (units) = Current Week Sales Units − Four‑Week Average Sales Units
+Response:
+For the period between the previous weekend and the current weekend, the region’s sales either exceeded, matched, or fell below its historical average. When sales exceed the average, it reflects a demand uptick and effective inventory alignment. If sales are stable, it signals consistent demand and balanced stock levels. If sales fall short, it indicates potential overstock risk and the need for corrective action.
+
+
+
+	Highest Overstock Percentage by Region for current weekend
+Reasoning:
+Overstock percentage is calculated by comparing current stock against adjusted demand for the current weekend. The measure highlights whether inventory levels are higher than what demand patterns suggest, after factoring in weather‑driven adjustments. A positive percentage indicates surplus inventory, while a negative or near‑zero percentage signals balanced or lean stock levels using inventory dataset.
+Formula:
+Current Stock -> inventory snapshot for the region at the start of the week
+Adjusted Demand = Average 4‑Week Sales×(1+(Metric−Normal Metric)/Normal Metric)
+overstock% = ( current_week_stock − adjusted_demand) x 100/adjusted_demand
+the formula compares how much stock you had at the beginning of the week against how much demand you realistically expected (after weather adjustment). If stock is higher, the surplus is expressed as a percentage above adjusted demand.
+Response:
+For the period between the previous weekend and the current weekend, the region’s inventory levels were found to be above adjusted demand, signaling an overstock situation. This suggests that while demand has shifted due to weather conditions, inventory replenishment has outpaced actual sales requirements. Such a surplus highlights the need for proactive promotional actions, redistribution strategies, or markdown planning to mitigate potential risks of waste or margin erosion.
+
+Financial Risk and Loss Alerts
+
+	Highest Weather‑Driven Stockout Loss by Region for current weekend
+
+Reasoning: 
+Stockout loss is calculated by comparing weather‑adjusted demand with the available stock for each product in a region using inventory datasets. If adjusted demand exceeds current stock, the difference represents unmet demand or lost sales. By aggregating these gaps across all products, the analysis identifies which region experienced the highest total loss for the current weekend.
+Formula:
+current stock -> week end stock
+Daily Sales Velocity = Total Sales in Last 28 Days/28
+Pct vs Normal = (Metric−Normal Metric)/Normal Metric
+Adjusted Velocity = Daily Sales Velocity×(1+Pct vs Normal)
+Loss Units = max⁡(0,  (Adjusted Velocity*7 −Current Stock))
+Total Regional Loss = ∑ Loss Units (units across all products)  
+
+This formula figures out how fast products normally sell (daily velocity), adjust that speed for weather effects (adjusted velocity), then compare it against how much stock was left at weekend. If demand was higher than stock, the gap is the lost units. Summing those gaps across all products gives the total regional stockout loss.  
+Response:
+For the period between the previous weekend and the current weekend, one region recorded the highest weather‑driven stockout loss, meaning a significant portion of customer demand could not be fulfilled due to insufficient inventory. This highlights a critical supply gap that risks lost revenue and customer dissatisfaction. Immediate action is required to strengthen replenishment processes, improve forecasting accuracy, and ensure inventory levels are better aligned with demand in this region.
+
+	Total Units Lost Across All Regions Due to Stockouts for current weekend
+Reasoning:
+The total lost units metric aggregates all product‑ and location‑level unmet demand across regions for the current weekend . It is calculated by summing the difference between expected sales (based on historical velocity) and actual sales for SKUs that experienced stockouts using sales dataset. This provides a comprehensive view of how widespread inventory shortages impacted overall business performance.
+Formula:
+Daily velocity =Total Sales in Last 28 Days /28
+Expected Sales(week) = Daily Velocity x 7
+Lost Units (per SKU) = max⁡(0,  (Expected Sales−Actual Sales)) 
+Total Lost Units (all regions) = ∑Lost Units (per SKU across products and locations)
+Response:
+For the period between the previous weekend and the current weekend, the business recorded a substantial number of lost sales units due to stockouts. This underscores the financial magnitude of inventory shortfalls and highlights the systemic nature of supply gaps across multiple regions. Addressing these shortfalls requires root cause analysis and corrective actions such as improved forecasting, faster replenishment, and better alignment of stock levels with demand patterns.
+
+	Highest Predicted Loss from Shelf-Life Risk and Overstock 
+Reasoning:
+Predicted inventory loss is calculated by combining two risk factors:
+	Shelf life risk: Stock that is expected to expire before it can be sold, or inventory that has already expired.
+	Overstock markdowns: Non‑perishable stock that exceeds two weeks of adjusted demand coverage, which would likely require discounting to clear.
+By summing these two components, the analysis identifies the total predicted loss for each region in current weekend. This provides visibility into both perishable waste and markdown exposure.
+Formula:  
+days_to_expiry > 0,  Shelf‑Life Loss (expiring)= (Current Stock−(Avg Daily Sales Units×Days to Expiry))×Unit Price
+days_to_expiry <= 0,  Shelf‑Life Loss (expired)=Current Stock×Unit Price
+Shelf‑Life Loss (Total)=Loss (expiring)+Loss (expired)
+Overstock Loss = (Current Stock−(Adjusted Demand×2))×Unit Price×0.30
+Where:
+	Adjusted Demand × 2 = safe inventory coverage for two weeks.
+	Current Stock − Coverage = surplus units.
+	0.30 = assumed markdown discount (30%).
+Total Predicted Loss = Shelf Life Loss + Overstock Loss
+calculation estimates how much inventory value is at risk either because products will expire before being sold (shelf life loss) or because excess stock will need to be discounted (overstock loss). Adding both gives the total predicted loss for the region.
+Response:
+For the period between the previous weekend and the current weekend, one region recorded the highest predicted inventory loss, driven by a combination of shelf‑life expiration and excess stock. This highlights a dual risk: perishable items that may not sell before expiry, and non‑perishable items that exceed demand coverage and could require markdowns. Proactive actions such as targeted promotions, redistribution of excess stock, and improved demand forecasting are recommended to minimize waste and reduce financial impact.
+
+Stockout Risk and Operational Trends
+
+	Week‑by‑Week Stockout Rate 
+Reasoning:
+The stockout rate is calculated by dividing the number of SKUs with zero stock at week end by the total SKUs available for that week using sales dataset. This metric highlights the proportion of products that were unavailable to meet customer demand. By comparing the current weekend  with the previous weekend. the analysis shows whether stockout conditions are improving, worsening, or remaining stable. 
+Formula:
+Stockout Rate (%) = SKUs with Zero Stock x 100/Total SKUs
+Response:
+For the period between the previous weekend and the current weekend, stockout rates remain alarmingly high, indicating that a large share of SKUs were unavailable to customers. This persistent shortage underscores significant operational and supply chain risks. Immediate corrective actions — such as restocking, improved forecasting, and supply chain adjustments — are required to restore inventory levels and prevent further lost sales.
+
+	Week‑by‑Week Stockout Rate Change
+Reasoning:
+The week‑on‑week stockout rate is calculated by comparing the percentage of SKUs with zero stock at the end of the current weekend against the previous weekend using sales and inventory datasets. The difference between the two rates shows whether stockout conditions are improving or worsening. In this case, the rate decreased slightly, but both weeks remain at critically high levels, signaling persistent supply chain challenges.
+Formula: 
+Stockout Rate (%) = SKUs with Zero Stock x 100 / Total SKUs 
+Week‑on‑Week Change (%) = Stockout Rate (Current Week) − Stockout Rate (Previous Week)
+Response:
+For the period between the previous weekend and the current weekend, there is a minor positive trend in stockout rates, reflecting a small improvement compared to last week. However, the overall rate remains alarmingly high, underscoring acute supply chain risk. Immediate intervention is required to restore inventory availability and prevent further lost sales.
+
+	Loss Due to Stockouts of Top 10 Fastest‑Selling SKUs
+Reasoning:
+The analysis identifies the top 10 fastest‑selling SKUs based on sales velocity over the past 28 days using sales and inventory datasets. For each SKU, expected weekly demand is calculated using average daily velocity multiplied by seven days. Actual sales for the current week are then compared against this expected demand. If a SKU had zero stock at weekend, the difference between expected and actual sales represents the lost units due to stockouts. This highlights which fast‑moving products and store combinations suffered the largest single‑unit losses.
+Formula:
+Expected Weekly Velocity = 28‑Day Total Sales x 7 /28 
+Lost Units (per SKU) = max⁡ (0, (Expected Weekly Velocity−Actual Weekly Sales  )) 
+Top 10 SKU Losses = Rank SKUs by Lost Units (store level)
+
+Response:
+For the period between the previous weekend and the current weekend, one fast‑moving SKU and store combination recorded the highest  loss due to stockouts. This indicates that despite strong demand, inventory was unavailable to meet customer needs, resulting in significant lost sales. Such cases highlight restock priorities for high‑velocity products, where even short‑term shortages can lead to substantial revenue impact.
+
+
+
+
+
+
+
+
+
+
