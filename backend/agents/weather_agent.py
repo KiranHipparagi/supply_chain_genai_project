@@ -1,144 +1,198 @@
-from typing import Dict, Any
-from openai import AzureOpenAI
-from core.config import settings
+"""
+Weather Agent - Domain Expert for Weather Data Analysis
+Provides domain hints for weather conditions, flags, and correlations.
+Does NOT execute SQL - that's DatabaseAgent's job.
+"""
+
+from typing import Dict, Any, List
 from core.logger import logger
-from database.postgres_db import get_db, WeatherData
-from sqlalchemy import desc
 
 
 class WeatherAgent:
-    """Agent specialized in weather data analysis and impact assessment"""
+    """
+    Domain Expert for Weather Data Analysis.
     
-    # Static current date context (Nov 8, 2025)
-    CURRENT_WEEKEND_DATE = "2025-11-08"
+    Responsibilities:
+    - Identify if query is weather-related
+    - Provide domain hints (weather columns, flags, temperature ranges)
+    - Help correlate weather with sales/demand
+    
+    Does NOT:
+    - Execute SQL queries
+    - Connect to database directly
+    
+    Tables this expert knows about:
+    - weekly_weather (primary)
+    - location (joins)
+    - calendar (joins)
+    """
+    
+    WEATHER_KEYWORDS = [
+        "weather", "temperature", "rain", "precipitation", "climate",
+        "hot", "cold", "heatwave", "cold spell", "storm", "snow",
+        "humid", "dry", "forecast", "tmax", "tmin",
+        "weather condition", "weather impact", "weather flag"
+    ]
     
     def __init__(self):
-        self.client = AzureOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=settings.OPENAI_ENDPOINT
-        )
-        self.system_prompt = """You are a weather analysis expert for RETAIL SUPPLY CHAIN operations.
-Analyze weather data and provide insights on potential supply chain impacts.
-
-=== CURRENT DATE CONTEXT ===
-This Weekend (Current Week End Date): November 8, 2025 (2025-11-08)
-- "Next week" = November 15, 2025 | "Last week" = November 1, 2025
-- "Next month" = December 2025 | "Last month" = October 2025
-- Current Year: 2025 | Last Year (LY): 2024
-
-=== SEASONS (NRF Calendar) ===
-- Spring: February, March, April
-- Summer: May, June, July
-- Fall: August, September, October
-- Winter: November, December, January
-
-=== WDD (Weather Driven Demand) ANALYSIS ===
-1. Short-Term (≤4 weeks): Compare WDD vs Normal Demand
-   - Use metric vs metric_nrm columns
-   - Formula: (SUM(metric) - SUM(metric_nrm)) / SUM(metric_nrm)
-   - Positive = weather driving demand UP, Negative = demand DOWN
-
-2. Long-Term (>4 weeks): Compare WDD vs Last Year
-   - Use metric vs metric_ly columns
-   - Formula: (SUM(metric) - SUM(metric_ly)) / SUM(metric_ly)
-
-=== WEATHER FLAGS TO ANALYZE ===
-- heatwave_flag: Indicates extreme heat period
-- cold_spell_flag: Indicates extreme cold period
-- heavy_rain_flag: Indicates heavy precipitation
-- snow_flag: Indicates snow conditions
-- temp_anom_f: Temperature anomaly from normal (degrees F)
-
-=== ANALYSIS FOCUS ===
-1. Temperature extremes and their demand impact
-2. Precipitation effects on store traffic and product demand
-3. Seasonal weather patterns vs historical norms
-4. Heatwave/Cold spell impacts on specific product categories
-5. Weather-driven demand predictions for planning
-
-Provide specific insights with weather data, impact scores, and actionable recommendations."""
+        logger.info("🌤️ WeatherAgent initialized as domain expert")
     
-    def analyze(self, query: str, location_id: str) -> Dict[str, Any]:
-        """Analyze weather impact on supply chain"""
-        try:
-            # Fetch recent weather data (location_id is the store_id in weather table)
-            with get_db() as db:
-                weather_records = db.query(WeatherData).filter(
-                    WeatherData.store_id == location_id
-                ).order_by(desc(WeatherData.week_end_date)).limit(10).all()
-            
-            if not weather_records:
-                return {
-                    "agent": "weather",
-                    "analysis": f"No weather data available for location {location_id}",
-                    "data": [],
-                    "impact_score": 0.0
-                }
-            
-            weather_context = "\n".join([
-                f"Week Ending: {w.week_end_date}, Avg Temp: {w.avg_temp_f}°F, " +
-                f"Temp Anomaly: {w.temp_anom_f}°F, Precip: {w.precip_in} in, " +
-                f"Flags: Heatwave={w.heatwave_flag}, Cold={w.cold_spell_flag}, " +
-                f"Heavy Rain={w.heavy_rain_flag}, Snow={w.snow_flag}"
-                for w in weather_records
-            ])
-            
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": f"Query: {query}\n\nWeather Data:\n{weather_context}"}
-                ],
-                temperature=0.3,
-                max_tokens=800
-            )
-            
-            analysis = response.choices[0].message.content
-            
-            return {
-                "agent": "weather",
-                "analysis": analysis,
-                "data": [
-                    {
-                        "week_end_date": str(w.week_end_date), 
-                        "avg_temp_f": w.avg_temp_f,
-                        "temp_anom_f": w.temp_anom_f,
-                        "precip_in": w.precip_in,
-                        "heatwave": w.heatwave_flag,
-                        "cold_spell": w.cold_spell_flag,
-                        "heavy_rain": w.heavy_rain_flag,
-                        "snow": w.snow_flag
-                    } 
-                    for w in weather_records[:5]
-                ],
-                "impact_score": self._calculate_impact(weather_records)
-            }
-        except Exception as e:
-            logger.error(f"Weather analysis failed: {e}")
-            return {"agent": "weather", "error": str(e)}
+    def can_handle(self, query: str) -> bool:
+        """Check if this agent can provide domain hints for the query"""
+        query_lower = query.lower()
+        return any(kw in query_lower for kw in self.WEATHER_KEYWORDS)
     
-    def _calculate_impact(self, weather_records: list) -> float:
-        """Calculate weather impact score (0-1)"""
-        if not weather_records:
-            return 0.0
+    def get_domain_hints(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Return domain-specific hints for SQL generation.
+        This does NOT execute SQL - it provides context for DatabaseAgent.
+        """
+        query_lower = query.lower()
         
-        impact = 0.0
-        for w in weather_records:
-            # Temperature extremes (above 90F or below 32F)
-            if w.tmax_f and (w.tmax_f > 90 or w.tmax_f < 32):
-                impact += 0.2
-            # Heavy precipitation (> 1 inch)
-            if w.precip_in and w.precip_in > 1.0:
-                impact += 0.15
-            # Extreme weather flags
-            if w.heatwave_flag:
-                impact += 0.3
-            if w.cold_spell_flag:
-                impact += 0.3
-            if w.heavy_rain_flag:
-                impact += 0.25
-            if w.snow_flag:
-                impact += 0.3
+        hints = {
+            "agent": "weather",
+            "domain": "weather_analysis",
+            "primary_table": "weekly_weather",
+            "description": "Weather conditions and flags for demand correlation",
+            
+            # Table schema
+            "table_schema": """
+-- WEEKLY_WEATHER TABLE
+weekly_weather (
+    store_id VARCHAR,           -- Store ID (joins with location.location)
+    week_end_date DATE,         -- Week ending date (joins with calendar.end_date)
+    tmax NUMERIC,               -- Maximum temperature (°F)
+    tmin NUMERIC,               -- Minimum temperature (°F)
+    precip NUMERIC,             -- Precipitation (inches)
+    heatwave_flag BOOLEAN,      -- True if heatwave conditions
+    cold_spell_flag BOOLEAN,    -- True if cold spell conditions
+    heavy_rain_flag BOOLEAN,    -- True if heavy rain
+    snow_flag BOOLEAN           -- True if snow
+)
+""",
+            
+            # Key columns
+            "key_columns": {
+                "store_id": "Store ID (VARCHAR) - joins with location.location",
+                "week_end_date": "Week ending date (DATE) - joins with calendar.end_date",
+                "tmax": "Max temperature in °F",
+                "tmin": "Min temperature in °F",
+                "precip": "Precipitation in inches",
+                "heatwave_flag": "Boolean - extreme heat conditions",
+                "cold_spell_flag": "Boolean - extreme cold conditions",
+                "heavy_rain_flag": "Boolean - heavy precipitation",
+                "snow_flag": "Boolean - snow conditions"
+            },
+            
+            # Join patterns
+            "join_patterns": """
+-- Standard Weather Joins:
+FROM weekly_weather w
+JOIN location l ON w.store_id = l.location
+JOIN calendar c ON w.week_end_date = c.end_date
+""",
+            
+            # Weather flag formulas
+            "formulas": [],
+            
+            # Weather condition definitions
+            "weather_definitions": {
+                "ideal_beach_weather": "tmax BETWEEN 80 AND 95 AND tmin >= 65 AND precip <= 0.1 AND heatwave_flag = false AND cold_spell_flag = false AND heavy_rain_flag = false",
+                "heatwave": "heatwave_flag = true OR tmax > 95",
+                "cold_spell": "cold_spell_flag = true OR tmin < 32",
+                "rainy": "heavy_rain_flag = true OR precip > 0.5",
+                "normal": "heatwave_flag = false AND cold_spell_flag = false AND heavy_rain_flag = false AND snow_flag = false"
+            },
+            
+            # Time context
+            "time_context": self._detect_time_context(query_lower)
+        }
         
-        return min(impact / len(weather_records), 1.0)
+        # Add weather condition formula
+        if any(word in query_lower for word in ["condition", "flag", "type of weather"]):
+            hints["formulas"].append({
+                "name": "Weather Condition Classification",
+                "sql": """
+CASE 
+    WHEN w.heatwave_flag = true THEN 'Heatwave'
+    WHEN w.cold_spell_flag = true THEN 'Cold Spell'
+    WHEN w.heavy_rain_flag = true THEN 'Heavy Rain'
+    WHEN w.snow_flag = true THEN 'Snow'
+    ELSE 'Normal'
+END AS weather_condition
+""",
+                "description": "Classify weather into conditions"
+            })
+        
+        # Temperature analysis
+        if any(word in query_lower for word in ["temperature", "hot", "cold", "tmax", "tmin"]):
+            hints["formulas"].append({
+                "name": "Temperature Stats",
+                "sql": "AVG(w.tmax) AS avg_high_temp, AVG(w.tmin) AS avg_low_temp, MAX(w.tmax) AS max_temp, MIN(w.tmin) AS min_temp",
+                "description": "Temperature statistics"
+            })
+        
+        # Precipitation analysis
+        if any(word in query_lower for word in ["rain", "precipitation", "precip", "wet"]):
+            hints["formulas"].append({
+                "name": "Precipitation Stats",
+                "sql": "SUM(w.precip) AS total_precip, AVG(w.precip) AS avg_precip",
+                "description": "Precipitation totals and averages"
+            })
+        
+        # Weather event counts
+        if any(word in query_lower for word in ["how many", "count", "events", "occurrences"]):
+            hints["formulas"].append({
+                "name": "Weather Event Counts",
+                "sql": """
+SUM(CASE WHEN w.heatwave_flag THEN 1 ELSE 0 END) AS heatwave_count,
+SUM(CASE WHEN w.cold_spell_flag THEN 1 ELSE 0 END) AS cold_spell_count,
+SUM(CASE WHEN w.heavy_rain_flag THEN 1 ELSE 0 END) AS heavy_rain_count,
+SUM(CASE WHEN w.snow_flag THEN 1 ELSE 0 END) AS snow_count
+""",
+                "description": "Count of weather events"
+            })
+        
+        # Beach weather (for food diversification queries)
+        if any(word in query_lower for word in ["beach", "ideal", "miami", "coastal", "summer"]):
+            hints["formulas"].append({
+                "name": "Ideal Beach Weather Filter",
+                "sql": "w.tmax BETWEEN 80 AND 95 AND w.tmin >= 65 AND w.precip <= 0.1 AND w.heatwave_flag = false AND w.cold_spell_flag = false AND w.heavy_rain_flag = false AND w.snow_flag = false",
+                "description": "Filter for ideal beach weather conditions",
+                "use_as": "WHERE clause condition"
+            })
+        
+        logger.info(f"🌤️ WeatherAgent provided {len(hints['formulas'])} weather hints")
+        return hints
+    
+    def _detect_time_context(self, query: str) -> Dict[str, Any]:
+        """Detect time context from query"""
+        context = {
+            "current_week_end": "2025-11-08",
+            "date_filter": None
+        }
+        
+        if any(word in query for word in ["last week", "previous week"]):
+            context["date_filter"] = "w.week_end_date = '2025-11-01'"
+        elif any(word in query for word in ["next week"]):
+            context["date_filter"] = "w.week_end_date = '2025-11-15'"
+        elif any(word in query for word in ["this week", "current"]):
+            context["date_filter"] = "w.week_end_date = '2025-11-08'"
+        elif any(word in query for word in ["last year", "2024"]):
+            context["date_filter"] = "c.year = 2024"
+        
+        return context
+    
+    def get_example_queries(self) -> List[str]:
+        """Return example queries this agent can help with"""
+        return [
+            "What was the weather last week in Florida?",
+            "Show stores with heatwave conditions",
+            "How many cold spell events in Northeast?",
+            "What's the average temperature by region?",
+            "Find weeks with ideal beach weather in Miami"
+        ]
+
+
+# Global instance
+weather_agent = WeatherAgent()

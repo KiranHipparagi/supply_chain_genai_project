@@ -1,240 +1,199 @@
-from typing import Dict, Any
-from openai import AzureOpenAI
-from datetime import datetime, timedelta
-from core.config import settings
+"""
+Events Agent - Domain Expert for Event Analysis
+Provides domain hints for events, holidays, and their impact on demand.
+Does NOT execute SQL - that's DatabaseAgent's job.
+"""
+
+from typing import Dict, Any, List
 from core.logger import logger
-from database.postgres_db import get_db, EventsData
-from sqlalchemy import or_, and_
 
 
 class EventsAgent:
-    """Agent specialized in event impact analysis - Enhanced with real database queries"""
+    """
+    Domain Expert for Event Analysis.
     
-    # Static current date context (Nov 8, 2025)
-    CURRENT_WEEKEND_DATE = "2025-11-08"
+    Responsibilities:
+    - Identify if query is events-related
+    - Provide domain hints (event types, proximity, impact)
+    - Help correlate events with demand spikes
+    
+    Does NOT:
+    - Execute SQL queries
+    - Connect to database directly
+    
+    Tables this expert knows about:
+    - events (primary)
+    - location (joins)
+    - calendar (joins)
+    """
+    
+    EVENTS_KEYWORDS = [
+        "event", "events", "holiday", "festival", "concert",
+        "sports", "game", "match", "thanksgiving", "christmas",
+        "super bowl", "memorial day", "labor day", "black friday",
+        "new year", "easter", "halloween", "fourth of july",
+        "event impact", "event proximity", "upcoming event"
+    ]
+    
+    # Event types
+    EVENT_TYPES = [
+        "Sports", "Concert", "Festival", "Holiday", "Conference",
+        "Fair", "Convention", "Parade", "Marathon", "Cultural"
+    ]
     
     def __init__(self):
-        self.client = AzureOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=settings.OPENAI_ENDPOINT
-        )
-        self.system_prompt = """You are an events analysis expert for RETAIL SUPPLY CHAIN planning.
-Analyze calendar events, holidays, and special occasions to forecast demand changes.
-
-=== CURRENT DATE CONTEXT ===
-This Weekend (Current Week End Date): November 8, 2025 (2025-11-08)
-- "Next week" = November 15, 2025 | "Last week" = November 1, 2025
-- "Next month" = December 2025 | "Last month" = October 2025
-- Current Year: 2025 | Last Year (LY): 2024
-
-=== EVENT-BASED DEMAND ANALYSIS LOGIC ===
-Follow these steps for event impact analysis:
-
-Step 1: IDENTIFY HISTORICAL EVENTS
-- From Events dataset, identify Last Year's similar events
-- Confirm proximity to store using lat/long mapping
-- If store not directly mapped, fallback to Market level proximity
-- Extract their event weeks from calendar
-
-Step 2: COMPUTE HISTORICAL SALES
-- From Sales/Inventory dataset, compute sales for:
-  • Historical festival weeks (last year)
-  • Corresponding prior weeks (for comparison baseline)
-
-Step 3: COMPUTE PRODUCT-LEVEL UPLIFT
-- For last year's event weeks, compute product-level sales uplift vs prior weeks
-- Calculate at Store/Market level for all products
-- Identify products that repeatedly showed sales uplift during events
-
-Step 4: CHECK CURRENT STOCK LEVELS
-- Use Sales/Inventory to check current stock levels
-- Identify patterns of low availability for high-uplift products
-- Flag products at risk of stockout during upcoming event
-
-Step 5: PRESENT RECOMMENDATIONS
-- Present top products expected to experience highest demand
-- Highlight products requiring inventory reinforcement
-- Provide specific reorder quantities based on historical uplift
-
-=== EVENT TYPES TO CONSIDER ===
-- Holidays (Federal, State, Religious)
-- Sports events (Super Bowl, March Madness, etc.)
-- Music festivals and concerts
-- Local community events
-- Seasonal events (Back to School, Summer Kickoff)
-
-Provide specific insights with event names, dates, locations, and demand impact predictions."""
+        logger.info("🎉 EventsAgent initialized as domain expert")
     
-    def analyze(self, query: str, location_id: str = None, timeframe_days: int = 90) -> Dict[str, Any]:
-        """Analyze event impact on demand with real database queries"""
-        try:
-            # Use static current date (Nov 8, 2025) instead of datetime.now()
-            start_date = datetime(2025, 11, 8)  # Current weekend date
-            end_date = start_date + timedelta(days=timeframe_days)
-            
-            logger.info(f"Events Agent analyzing query: {query} (date context: {start_date.strftime('%Y-%m-%d')})")
-            
-            with get_db() as db:
-                # Build query based on user input
-                query_lower = query.lower()
-                filters = [EventsData.event_date >= start_date, EventsData.event_date <= end_date]
-                
-                # Location filters
-                if location_id and location_id != "default":
-                    filters.append(EventsData.store_id == location_id)
-                
-                # Smart keyword filtering
-                if any(word in query_lower for word in ["new york", "ny"]):
-                    filters.append(or_(
-                        EventsData.state.ilike("%new york%"),
-                        EventsData.market.ilike("%new york%")
-                    ))
-                elif any(word in query_lower for word in ["massachusetts", "ma", "boston"]):
-                    filters.append(or_(
-                        EventsData.state.ilike("%massachusetts%"),
-                        EventsData.market.ilike("%boston%")
-                    ))
-                elif any(word in query_lower for word in ["northeast", "east"]):
-                    filters.append(EventsData.region.ilike("%northeast%"))
-                elif any(word in query_lower for word in ["southwest", "west"]):
-                    filters.append(EventsData.region.ilike("%southwest%"))
-                
-                # Event type filters
-                if "holiday" in query_lower:
-                    filters.append(EventsData.event_type.ilike("%holiday%"))
-                elif "sport" in query_lower:
-                    filters.append(EventsData.event_type.ilike("%sports%"))
-                
-                # Execute query
-                events = db.query(EventsData).filter(and_(*filters)).limit(20).all()
-                
-                logger.info(f"Found {len(events)} events matching criteria")
-                
-                # Convert to dictionaries to avoid session issues
-                events_data = [{
-                    'event': e.event,
-                    'event_type': e.event_type,
-                    'event_date': e.event_date,
-                    'store_id': e.store_id,
-                    'region': e.region,
-                    'market': e.market,
-                    'state': e.state
-                } for e in events]
-            
-            if not events_data:
-                return {
-                    "agent": "events",
-                    "summary": f"No events found matching your criteria for the next {timeframe_days} days.",
-                    "events_count": 0,
-                    "recommendation": "Try broadening your search or checking a different location/timeframe.",
-                    "impact_score": 0.0
-                }
-            
-            # Build context for LLM
-            events_context = self._build_events_context(events_data)
-            impact_forecast = self._forecast_impact(events_data)
-            
-            # Generate AI insights
-            prompt = f"""Query: {query}
-
-Events Data:
-{events_context}
-
-Impact Forecast:
-{impact_forecast}
-
-Provide a detailed analysis including:
-1. List of upcoming events with dates and locations
-2. Expected demand impact for each event type
-3. Recommendations for inventory and supply chain planning
-4. Regional insights if applicable"""
-
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=800
-            )
-            
-            answer = response.choices[0].message.content
-            
-            return {
-                "agent": "events",
-                "answer": answer,
-                "events_count": len(events_data),
-                "events_summary": events_context,
-                "impact_forecast": impact_forecast,
-                "regions_covered": list(set(e['region'] for e in events_data if e.get('region'))),
-                "states_covered": list(set(e['state'] for e in events_data if e.get('state'))),
-                "event_types": list(set(e['event_type'] for e in events_data if e.get('event_type')))
-            }
-            
-        except Exception as e:
-            logger.error(f"Events agent error: {str(e)}")
-            return {
-                "agent": "events",
-                "error": str(e),
-                "answer": f"I encountered an error analyzing events: {str(e)}"
-            }
+    def can_handle(self, query: str) -> bool:
+        """Check if this agent can provide domain hints for the query"""
+        query_lower = query.lower()
+        return any(kw in query_lower for kw in self.EVENTS_KEYWORDS)
     
-    def _build_events_context(self, events: list) -> str:
-        """Build readable events context"""
-        if not events:
-            return "No events found."
+    def get_domain_hints(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Return domain-specific hints for SQL generation.
+        This does NOT execute SQL - it provides context for DatabaseAgent.
+        """
+        query_lower = query.lower()
         
-        context_lines = []
-        for event in events[:15]:  # Limit to prevent token overflow
-            date_str = event['event_date'].strftime("%B %d, %Y") if event.get('event_date') else "TBD"
-            context_lines.append(
-                f"- {event['event']} ({event['event_type']}) on {date_str} "
-                f"in {event.get('state', 'Unknown')} (Store: {event['store_id']})"
-            )
-        
-        return "\n".join(context_lines)
-    
-    def _forecast_impact(self, events: list) -> Dict[str, Any]:
-        """Forecast demand impact from events"""
-        if not events:
-            return {"total_events": 0, "high_impact": 0, "medium_impact": 0, "low_impact": 0}
-        
-        impact_map = {
-            "national holiday": 0.8,
-            "holiday": 0.7,
-            "festival": 0.6,
-            "sports": 0.5,
-            "concert": 0.4,
-            "cultural": 0.4
+        hints = {
+            "agent": "events",
+            "domain": "event_analysis",
+            "primary_table": "events",
+            "description": "Event data including holidays, sports, festivals mapped to store proximity",
+            
+            # Table schema
+            "table_schema": """
+-- EVENTS TABLE
+events (
+    event VARCHAR,              -- Event name
+    event_type VARCHAR,         -- Type: Sports, Concert, Festival, Holiday, etc.
+    event_date DATE,            -- Date of event
+    store_id VARCHAR,           -- Store in proximity (joins with location.location)
+    event_start_date DATE,      -- Multi-day event start
+    event_end_date DATE         -- Multi-day event end
+)
+-- Events are pre-mapped to stores by geographic proximity (lat/long)
+""",
+            
+            # Key columns
+            "key_columns": {
+                "event": "Event name (VARCHAR)",
+                "event_type": "Event category: Sports, Concert, Festival, Holiday, etc.",
+                "event_date": "Primary event date (DATE)",
+                "store_id": "Store ID in proximity (joins with location.location)",
+                "event_start_date": "Multi-day event start (DATE)",
+                "event_end_date": "Multi-day event end (DATE)"
+            },
+            
+            # Join patterns
+            "join_patterns": """
+-- Standard Events Joins:
+FROM events e
+JOIN location l ON e.store_id = l.location
+-- To correlate with calendar:
+JOIN calendar c ON e.event_date = c.end_date
+""",
+            
+            # Event types list
+            "event_types": self.EVENT_TYPES,
+            
+            # Formulas
+            "formulas": [],
+            
+            # Time context
+            "time_context": self._detect_time_context(query_lower)
         }
         
-        impacts = {
-            "total_events": len(events),
-            "high_impact": 0,
-            "medium_impact": 0,
-            "low_impact": 0,
-            "event_details": []
-        }
-        
-        for event in events:
-            event_type = event.get('event_type', '').lower() if event.get('event_type') else "other"
-            impact_score = impact_map.get(event_type, 0.3)
-            
-            if impact_score >= 0.7:
-                impacts["high_impact"] += 1
-            elif impact_score >= 0.4:
-                impacts["medium_impact"] += 1
-            else:
-                impacts["low_impact"] += 1
-            
-            impacts["event_details"].append({
-                "name": event['event'],
-                "type": event.get('event_type'),
-                "date": event['event_date'].strftime("%Y-%m-%d") if event.get('event_date') else None,
-                "impact_score": impact_score,
-                "location": f"{event.get('state', 'Unknown')}, {event.get('region', 'Unknown')}"
+        # Event counts
+        if any(word in query_lower for word in ["how many", "count", "number of"]):
+            hints["formulas"].append({
+                "name": "Event Count",
+                "sql": "COUNT(DISTINCT e.event) AS event_count",
+                "description": "Count of distinct events"
             })
         
-        return impacts
+        # Events by type
+        if any(word in query_lower for word in ["type", "category", "breakdown"]):
+            hints["formulas"].append({
+                "name": "Events by Type",
+                "sql": "e.event_type, COUNT(*) AS event_count",
+                "description": "Events grouped by type",
+                "requires_groupby": "GROUP BY e.event_type"
+            })
+        
+        # Upcoming events
+        if any(word in query_lower for word in ["upcoming", "next", "future", "scheduled"]):
+            hints["formulas"].append({
+                "name": "Upcoming Events Filter",
+                "sql": "e.event_date >= '2025-11-08'",
+                "description": "Filter for future events",
+                "use_as": "WHERE clause"
+            })
+        
+        # Events by region
+        if any(word in query_lower for word in ["region", "by region", "regional"]):
+            hints["formulas"].append({
+                "name": "Events by Region",
+                "sql": "l.region, COUNT(DISTINCT e.event) AS event_count",
+                "description": "Events grouped by region",
+                "requires_groupby": "GROUP BY l.region"
+            })
+        
+        # High-impact events
+        if any(word in query_lower for word in ["major", "big", "important", "high impact"]):
+            hints["formulas"].append({
+                "name": "Major Events Filter",
+                "sql": "e.event_type IN ('Holiday', 'Sports', 'Festival')",
+                "description": "Filter for high-impact event types",
+                "use_as": "WHERE clause"
+            })
+        
+        # Holiday specific
+        if any(word in query_lower for word in ["holiday", "thanksgiving", "christmas", "easter"]):
+            hints["formulas"].append({
+                "name": "Holiday Events Filter",
+                "sql": "e.event_type = 'Holiday'",
+                "description": "Filter for holiday events only",
+                "use_as": "WHERE clause"
+            })
+        
+        logger.info(f"🎉 EventsAgent provided {len(hints['formulas'])} event hints")
+        return hints
+    
+    def _detect_time_context(self, query: str) -> Dict[str, Any]:
+        """Detect time context from query"""
+        context = {
+            "current_date": "2025-11-08",
+            "date_filter": None,
+            "timeframe": "current"
+        }
+        
+        if any(word in query for word in ["upcoming", "next", "future"]):
+            context["timeframe"] = "future"
+            context["date_filter"] = "e.event_date >= '2025-11-08'"
+        elif any(word in query for word in ["past", "previous", "last"]):
+            context["timeframe"] = "past"
+            context["date_filter"] = "e.event_date < '2025-11-08'"
+        elif any(word in query for word in ["this month", "november"]):
+            context["timeframe"] = "current_month"
+            context["date_filter"] = "e.event_date BETWEEN '2025-11-01' AND '2025-11-30'"
+        elif any(word in query for word in ["next month", "december"]):
+            context["timeframe"] = "next_month"
+            context["date_filter"] = "e.event_date BETWEEN '2025-12-01' AND '2025-12-31'"
+        
+        return context
+    
+    def get_example_queries(self) -> List[str]:
+        """Return example queries this agent can help with"""
+        return [
+            "What events are happening next month?",
+            "Show me holiday events in the South region",
+            "How many sports events are near Miami stores?",
+            "What's the event breakdown by type?",
+            "List upcoming festivals in the Northeast"
+        ]
+
+
+# Global instance
+events_agent = EventsAgent()

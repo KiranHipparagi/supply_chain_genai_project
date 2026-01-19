@@ -1,91 +1,226 @@
+"""
+Location Agent - Domain Expert for Location/Geographic Analysis
+Provides domain hints for regions, markets, states, and store-level data.
+Does NOT execute SQL - that's DatabaseAgent's job.
+"""
+
 from typing import Dict, Any, List
-from openai import AzureOpenAI
-from core.config import settings
 from core.logger import logger
-from database.gremlin_db import gremlin_conn
 
 
 class LocationAgent:
-    """Agent specialized in location-based analysis"""
+    """
+    Domain Expert for Location/Geographic Analysis.
     
-    # Static current date context (Nov 8, 2025)
-    CURRENT_WEEKEND_DATE = "2025-11-08"
+    Responsibilities:
+    - Identify if query is location-related
+    - Provide domain hints (region/market/state hierarchy)
+    - Support geographic filtering and aggregation
+    
+    Does NOT:
+    - Execute SQL queries
+    - Connect to database directly
+    
+    Tables this expert knows about:
+    - location (primary)
+    """
+    
+    LOCATION_KEYWORDS = [
+        "location", "store", "region", "regional",
+        "market", "state", "area", "geographic",
+        "northeast", "southeast", "midwest", "southwest", "west",
+        "florida", "texas", "california", "new york",
+        "miami", "boston", "chicago", "dallas",
+        "by region", "by market", "by state", "by store"
+    ]
+    
+    # Known regions (lowercase for matching)
+    REGIONS = ["northeast", "southeast", "midwest", "southwest", "west", "south"]
+    
+    # Sample markets
+    MARKETS = ["miami, fl", "boston, ma", "chicago, il", "dallas, tx", "los angeles, ca"]
     
     def __init__(self):
-        self.client = AzureOpenAI(
-            api_key=settings.OPENAI_API_KEY,
-            api_version=settings.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=settings.OPENAI_ENDPOINT
-        )
-        self.system_prompt = """You are a location intelligence expert for RETAIL SUPPLY CHAIN operations.
-
-=== CURRENT DATE CONTEXT ===
-This Weekend (Current Week End Date): November 8, 2025 (2025-11-08)
-- "Next week" = November 15, 2025 | "Last week" = November 1, 2025
-- "Next month" = December 2025 | "Last month" = October 2025
-- Current Year: 2025 | Last Year (LY): 2024
-
-=== LOCATION HIERARCHY ===
-- Region → Market → State → Store
-- Example: Northeast → Boston, MA → Massachusetts → ST1234
-
-=== YOUR ANALYSIS FOCUS ===
-1. Geographic demand patterns by region/market
-2. Weather impact variations across locations
-3. Event proximity and local demand drivers
-4. Store-level vs market-level performance
-5. Regional inventory distribution optimization
-
-=== KEY LOCATION DATASETS ===
-- LocDim: Region, Market, State, Store ID, Lat/Long
-- Stores mapped to weather stations for weather data
-- Events mapped to stores by proximity (lat/long)
-
-Analyze geographical factors, regional patterns, and location-specific trends.
-Consider: demographics, weather patterns, event proximity, and regional preferences."""
+        logger.info("📍 LocationAgent initialized as domain expert")
     
-    def analyze(self, query: str, location_id: str) -> Dict[str, Any]:
-        """Analyze location-specific factors"""
-        try:
-            # Query Gremlin for location relationships
-            location_data = []
-            if gremlin_conn.ensure_connected():
-                location_data = gremlin_conn.query_supply_chain_impact("", location_id)
-            else:
-                logger.warning("Gremlin unavailable - using limited location analysis")
-            
-            context = self._build_location_context(location_data)
-            
-            response = self.client.chat.completions.create(
-                model=settings.OPENAI_MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": f"Query: {query}\n\nLocation Context:\n{context}"}
-                ],
-                temperature=0.3,
-                max_tokens=800
-            )
-            
-            return {
-                "agent": "location",
-                "analysis": response.choices[0].message.content,
-                "location_data": location_data,
-                "regional_factors": self._extract_factors(location_data),
-                "gremlin_available": gremlin_conn._connected
-            }
-        except Exception as e:
-            logger.error(f"Location analysis failed: {e}")
-            return {"agent": "location", "error": str(e)}
+    def can_handle(self, query: str) -> bool:
+        """Check if this agent can provide domain hints for the query"""
+        query_lower = query.lower()
+        return any(kw in query_lower for kw in self.LOCATION_KEYWORDS)
     
-    def _build_location_context(self, data: List[Dict]) -> str:
-        """Build readable location context"""
-        if not data:
-            return "No graph data available. Using basic location analysis."
-        return f"Location analysis with {len(data)} connected factors"
-    
-    def _extract_factors(self, data: List[Dict]) -> Dict[str, Any]:
-        """Extract key location factors"""
-        return {
-            "weather_impact": data[0].get("weather_impact", 0) if data else 0,
-            "event_impact": data[0].get("event_impact", 0) if data else 0
+    def get_domain_hints(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Return domain-specific hints for SQL generation.
+        This does NOT execute SQL - it provides context for DatabaseAgent.
+        """
+        query_lower = query.lower()
+        
+        hints = {
+            "agent": "location",
+            "domain": "geographic_analysis",
+            "primary_table": "location",
+            "description": "Geographic hierarchy and store location data",
+            
+            # Table schema
+            "table_schema": """
+-- LOCATION TABLE
+location (
+    id INTEGER,                 -- Primary key
+    location VARCHAR,           -- Store ID (e.g., 'ST0050')
+    region VARCHAR,             -- Region (e.g., 'northeast', 'southeast') - LOWERCASE
+    market VARCHAR,             -- Market (e.g., 'Miami, FL', 'Boston, MA')
+    state VARCHAR,              -- State (e.g., 'Florida', 'Massachusetts')
+    latitude NUMERIC,           -- Geographic coordinates
+    longitude NUMERIC           -- Geographic coordinates
+)
+
+-- IMPORTANT: region values are LOWERCASE (e.g., 'northeast' not 'Northeast')
+""",
+            
+            # Key columns
+            "key_columns": {
+                "location": "Store ID (VARCHAR) - e.g., 'ST0050', 'ST1234'",
+                "region": "Region (VARCHAR, LOWERCASE) - northeast, southeast, midwest, southwest, west",
+                "market": "Market/City (VARCHAR) - e.g., 'Miami, FL', 'Boston, MA'",
+                "state": "State (VARCHAR) - e.g., 'Florida', 'Texas'",
+                "latitude": "Latitude coordinate (NUMERIC)",
+                "longitude": "Longitude coordinate (NUMERIC)"
+            },
+            
+            # Hierarchy
+            "location_hierarchy": """
+Region → Market → State → Store
+Example: southeast → Miami, FL → Florida → ST0050
+
+Regions (LOWERCASE!):
+- northeast
+- southeast  
+- midwest
+- southwest
+- west
+- south
+""",
+            
+            # Join patterns
+            "join_patterns": """
+-- Location joins with other tables:
+-- Sales: sales.store_code = location.location
+-- Batches: batches.store_code = location.location
+-- Metrics: metrics.location = location.location
+-- Events: events.store_id = location.location
+-- Weather: weekly_weather.store_id = location.location
+""",
+            
+            # Formulas
+            "formulas": [],
+            
+            # Detected location filters
+            "detected_locations": self._detect_locations(query_lower)
         }
+        
+        # Store count
+        if any(word in query_lower for word in ["how many stores", "store count", "number of stores"]):
+            hints["formulas"].append({
+                "name": "Store Count",
+                "sql": "COUNT(DISTINCT l.location) AS store_count",
+                "description": "Count of unique stores"
+            })
+        
+        # By region aggregation
+        if any(word in query_lower for word in ["by region", "regional", "each region"]):
+            hints["formulas"].append({
+                "name": "Group by Region",
+                "sql": "l.region",
+                "description": "Aggregate by region",
+                "requires_groupby": "GROUP BY l.region"
+            })
+        
+        # By market aggregation
+        if any(word in query_lower for word in ["by market", "each market"]):
+            hints["formulas"].append({
+                "name": "Group by Market",
+                "sql": "l.market",
+                "description": "Aggregate by market",
+                "requires_groupby": "GROUP BY l.market"
+            })
+        
+        # By state aggregation
+        if any(word in query_lower for word in ["by state", "each state"]):
+            hints["formulas"].append({
+                "name": "Group by State",
+                "sql": "l.state",
+                "description": "Aggregate by state",
+                "requires_groupby": "GROUP BY l.state"
+            })
+        
+        # By store aggregation
+        if any(word in query_lower for word in ["by store", "each store", "store level"]):
+            hints["formulas"].append({
+                "name": "Group by Store",
+                "sql": "l.location",
+                "description": "Aggregate by individual store",
+                "requires_groupby": "GROUP BY l.location"
+            })
+        
+        logger.info(f"📍 LocationAgent provided hints with {len(hints['detected_locations'])} detected locations")
+        return hints
+    
+    def _detect_locations(self, query: str) -> Dict[str, Any]:
+        """Detect specific locations mentioned in query"""
+        detected = {
+            "regions": [],
+            "markets": [],
+            "states": [],
+            "filters": []
+        }
+        
+        # Check regions
+        for region in self.REGIONS:
+            if region in query:
+                detected["regions"].append(region)
+                detected["filters"].append(f"l.region = '{region}'")
+        
+        # Check common markets
+        market_keywords = {
+            "miami": "Miami, FL",
+            "boston": "Boston, MA",
+            "chicago": "Chicago, IL",
+            "dallas": "Dallas, TX",
+            "los angeles": "Los Angeles, CA",
+            "columbia": "Columbia, SC"
+        }
+        
+        for keyword, market in market_keywords.items():
+            if keyword in query:
+                detected["markets"].append(market)
+                detected["filters"].append(f"l.market = '{market}'")
+        
+        # Check states
+        state_keywords = {
+            "florida": "Florida",
+            "texas": "Texas",
+            "california": "California",
+            "new york": "New York",
+            "massachusetts": "Massachusetts"
+        }
+        
+        for keyword, state in state_keywords.items():
+            if keyword in query:
+                detected["states"].append(state)
+                detected["filters"].append(f"l.state = '{state}'")
+        
+        return detected
+    
+    def get_example_queries(self) -> List[str]:
+        """Return example queries this agent can help with"""
+        return [
+            "Show sales by region",
+            "How many stores in Florida?",
+            "What's the performance of Miami market?",
+            "Compare Northeast vs Southeast",
+            "List all stores in the South region"
+        ]
+
+
+# Global instance
+location_agent = LocationAgent()

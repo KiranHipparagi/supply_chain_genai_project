@@ -18,6 +18,8 @@ from .events_agent import EventsAgent
 from .location_agent import LocationAgent
 from .inventory_agent import InventoryAgent
 from .visualization_agent import VisualizationAgent  # LLM-powered visualization
+from .sales_agent import SalesAgent  # NEW: Dedicated sales agent
+from .metrics_agent import MetricsAgent  # NEW: Dedicated WDD/metrics agent
 import json
 import operator
 
@@ -72,11 +74,14 @@ class OrchestratorAgent:
         self.events_agent = EventsAgent()
         self.location_agent = LocationAgent()
         self.inventory_agent = InventoryAgent()
+        self.sales_agent = SalesAgent()  # NEW: Dedicated sales agent
+        self.metrics_agent = MetricsAgent()  # NEW: Dedicated WDD/metrics agent
         
         # LLM-powered visualization agent
         self.visualization_agent = VisualizationAgent()
         
         logger.info(f"✅ Orchestrator initialized with LangGraph")
+        logger.info(f"   Agents: Database, Weather, Events, Location, Inventory, Sales, Metrics")
         logger.info(f"   Visualization Mode: SMART (LLM-Powered)")
         
         # Build LangGraph workflow
@@ -431,112 +436,212 @@ Keep responses brief and professional.
         return state
     
     def _query_database(self, state: AgentState) -> AgentState:
-        """database query with chart-aware logic"""
+        """
+        CLEAN ARCHITECTURE: All SQL execution goes through DatabaseAgent.
+        Domain expert agents provide hints, DatabaseAgent executes SQL.
+        
+        Flow:
+        1. Collect domain hints from relevant expert agents
+        2. Pass hints to DatabaseAgent
+        3. DatabaseAgent generates and executes single SQL query
+        4. Return real data (prevents hallucination)
+        """
         try:
             query = state["query"]
             context = state["context"]
             chart_type = state.get("chart_type", "auto")
             
-            logger.info(f"🔍 Querying database for chart type: {chart_type}")
+            print("\n" + "="*80)
+            print("🔍 DATABASE QUERY NODE - Clean Architecture")
+            print("="*80)
+            print(f"📝 Query: {query[:100]}...")
             
-            # If chart type is known and not 'auto', use chart-specific query
-            if chart_type != "auto":
+            logger.info(f"🔍 Processing query: {query[:50]}...")
+            
+            # =====================================================
+            # STEP 1: Collect domain hints from expert agents
+            # =====================================================
+            domain_hints = []
+            active_agents = []
+            
+            # Check each domain expert and collect hints
+            if self.sales_agent.can_handle(query):
+                hints = self.sales_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("sales")
+                logger.info("   ↳ Sales agent provided hints")
+                
+            if self.metrics_agent.can_handle(query):
+                hints = self.metrics_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("metrics")
+                logger.info("   ↳ Metrics agent provided hints")
+                
+            if self.weather_agent.can_handle(query):
+                hints = self.weather_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("weather")
+                logger.info("   ↳ Weather agent provided hints")
+                
+            if self.events_agent.can_handle(query):
+                hints = self.events_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("events")
+                logger.info("   ↳ Events agent provided hints")
+                
+            if self.inventory_agent.can_handle(query):
+                hints = self.inventory_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("inventory")
+                logger.info("   ↳ Inventory agent provided hints")
+                
+            if self.location_agent.can_handle(query):
+                hints = self.location_agent.get_domain_hints(query, context)
+                domain_hints.append(hints)
+                active_agents.append("location")
+                logger.info("   ↳ Location agent provided hints")
+            
+            print(f"📋 Active domain experts: {active_agents}")
+            logger.info(f"📋 Collected hints from {len(domain_hints)} domain experts: {active_agents}")
+            
+            # =====================================================
+            # STEP 2: Execute query via DatabaseAgent (ONLY SQL executor)
+            # =====================================================
+            db_result = None
+            
+            # If chart type is specified, use chart-specific SQL generation
+            if chart_type and chart_type != "auto":
                 chart_type_map = {
-                    "pie": "PieChart",
-                    "bar": "BarChart",
-                    "line": "LineChart",
-                    "area": "AreaChart",
-                    "scatter": "ScatterChart",
-                    "map": "GeoChart",
-                    "histogram": "Histogram",
-                    "table": "Table"
+                    "pie": "PieChart", "PieChart": "PieChart",
+                    "bar": "BarChart", "BarChart": "BarChart",
+                    "column": "ColumnChart", "ColumnChart": "ColumnChart",
+                    "line": "LineChart", "LineChart": "LineChart",
+                    "area": "AreaChart", "AreaChart": "AreaChart",
+                    "scatter": "ScatterChart", "ScatterChart": "ScatterChart",
+                    "map": "GeoChart", "GeoChart": "GeoChart",
+                    "histogram": "Histogram", "Histogram": "Histogram",
+                    "table": "Table", "Table": "Table"
                 }
                 google_chart_type = chart_type_map.get(chart_type, "auto")
                 
                 if google_chart_type != "auto":
-                    # Use chart-specific query
+                    # For chart queries, use chart-specific method but with hints
                     db_result = self.database_agent.query_database_for_chart(
                         query, 
                         google_chart_type,
                         context
                     )
                 else:
-                    # Fallback to standard query
-                    db_result = self.database_agent.query_database(query, context)
+                    # Use clean architecture method with hints
+                    db_result = self.database_agent.query_with_hints(
+                        query=query,
+                        context=context,
+                        domain_hints=domain_hints
+                    )
             else:
-                # Standard query
-                db_result = self.database_agent.query_database(query, context)
+                # Use clean architecture method with hints
+                db_result = self.database_agent.query_with_hints(
+                    query=query,
+                    context=context,
+                    domain_hints=domain_hints
+                )
             
+            # =====================================================
+            # STEP 3: Validate result - prevent hallucination
+            # =====================================================
             state["db_result"] = db_result
+            state["agent_results"]["active_domains"] = active_agents
+            state["agent_results"]["domain_hints_count"] = len(domain_hints)
             
-            # CRITICAL: Check for zero rows - prevent hallucination
-            if db_result.get("row_count", 0) == 0 or db_result.get("status") == "success_no_data":
-                logger.warning("⚠️ Database query returned 0 rows - no matching data")
-                state["final_answer"] = db_result.get("answer", "No data available for your query. Please try different search criteria.")
-                state["status"] = "success_no_data"
-                state["agent_results"]["database"] = "No matching data found"
-                return state
+            # Extract SQL query for debugging
+            sql_query = db_result.get("sql_query", "N/A")
+            row_count = db_result.get("row_count", 0) if db_result else 0
+            data = db_result.get("data", []) if db_result else []
+            
+            print(f"\n📊 SQL Executed: {sql_query[:200]}..." if len(str(sql_query)) > 200 else f"\n📊 SQL Executed: {sql_query}")
+            print(f"📈 Rows Returned: {row_count}")
+            
+            # =====================================================
+            # ZERO-ROW HANDLING - Prevent hallucination
+            # =====================================================
+            if row_count == 0 or db_result.get("status") == "success_no_data" or not data:
+                logger.warning("⚠️ Database query returned 0 rows - providing factual response")
+                print("⚠️ ZERO ROWS - No data found for query")
+                
+                # Build informative zero-row response
+                zero_row_message = f"""**No data found for your query.**
 
-            if db_result.get("status") != "success" or not db_result.get("data"):
-                logger.warning("⚠️ No data found")
-                state["final_answer"] = f"I couldn't find data matching your query. Try rephrasing or using different filters.\n\nSQL: {db_result.get('sql_query', 'N/A')}"
-                state["status"] = "no_data"
-            else:
-                logger.info(f"✅ Found {len(db_result.get('data', []))} records for {chart_type}")
+I executed the following SQL query on the database:
+```sql
+{sql_query}
+```
+
+**Result:** 0 rows returned.
+
+**Possible reasons:**
+- The filters (product, location, date range) may be too restrictive
+- The data may not exist for the specified time period
+- Try broadening your search criteria
+
+**Suggestions:**
+- Remove or adjust date filters
+- Use broader location (e.g., region instead of specific store)
+- Check if the product name is spelled correctly
+"""
+                state["final_answer"] = zero_row_message
+                state["status"] = "success_no_data"
+                state["agent_results"]["database"] = "Query executed successfully but returned 0 rows"
+                print("="*80)
+                return state
+            
+            # =====================================================
+            # SUCCESS - Data found
+            # =====================================================
+            if db_result.get("status") == "success" and data:
+                logger.info(f"✅ Found {len(data)} records using hints from: {active_agents}")
+                print(f"✅ SUCCESS - Found {len(data)} rows of data")
                 state["status"] = "data_found"
+                
+                # If database agent provided analysis, use it
+                if db_result.get("analysis"):
+                    state["agent_results"]["analysis"] = db_result["analysis"]
+            else:
+                # Handle partial failures
+                logger.warning(f"⚠️ Query status: {db_result.get('status')}")
+                state["final_answer"] = f"Query executed but encountered an issue: {db_result.get('error', 'Unknown error')}\n\nSQL: {sql_query}"
+                state["status"] = "partial_error"
+            
+            print("="*80)
             
         except Exception as e:
-            logger.error(f"Database query failed: {e}")
-            state["final_answer"] = f"Database query failed: {str(e)}"
+            logger.error(f"❌ Database query failed: {e}", exc_info=True)
+            state["final_answer"] = f"""**Database query failed**
+
+Error: {str(e)}
+
+Please try rephrasing your question or contact support if the issue persists.
+"""
             state["status"] = "error"
+            state["db_result"] = {"data": [], "row_count": 0, "status": "error", "error": str(e)}
         
         return state
     
     def _analyze_with_agents(self, state: AgentState) -> AgentState:
-        """Run specialized agents for deeper analysis"""
+        """
+        Post-query analysis step.
+        
+        In the clean architecture, domain experts provided hints BEFORE SQL execution.
+        This step now just passes through, as analysis is done by DatabaseAgent.
+        
+        The analysis from DatabaseAgent (if any) is already stored in state["agent_results"]["analysis"]
+        """
         if state.get("status") != "data_found":
             return state
         
-        query = state["query"]
-        context = state["context"]
-        query_lower = query.lower()
+        # Analysis is already done by DatabaseAgent.analyze_results()
+        # No need for redundant agent calls
         
-        agent_results = {}
-        
-        # Weather analysis
-        if any(word in query_lower for word in ["weather", "temperature", "climate", "rain"]):
-            try:
-                weather_result = self.weather_agent.analyze(query, context.get("location_id", ""))
-                agent_results["weather"] = weather_result
-            except Exception as e:
-                logger.warning(f"Weather agent failed: {e}")
-        
-        # Events analysis
-        if any(word in query_lower for word in ["event", "holiday", "festival", "calendar"]):
-            try:
-                events_result = self.events_agent.analyze(query, context.get("location_id", ""))
-                agent_results["events"] = events_result
-            except Exception as e:
-                logger.warning(f"Events agent failed: {e}")
-        
-        # Inventory analysis (batch tracking, spoilage, sales transactions, stock movements)
-        if any(word in query_lower for word in [
-            "inventory", "stock", "batch", "expir", "shelf life", 
-            "spoil", "waste", "loss", "damage", "perishable",
-            "sales transaction", "revenue by batch", "batch sale",
-            "movement", "transfer", "adjustment", "stock tracking"
-        ]):
-            try:
-                inventory_result = self.inventory_agent.analyze(
-                    query,
-                    context.get("product_id", ""),
-                    context.get("location_id", "")
-                )
-                agent_results["inventory"] = inventory_result
-            except Exception as e:
-                logger.warning(f"Inventory agent failed: {e}")
-        
-        state["agent_results"] = agent_results
+        logger.info("📊 Analysis step: Using DatabaseAgent's analysis")
         return state
     
     def _route_after_analysis(self, state: AgentState) -> str:
@@ -631,168 +736,152 @@ Keep responses brief and professional.
         return state
     
     def _synthesize_response(self, state: AgentState) -> AgentState:
-        """Synthesize final response using LLM"""
+        """
+        Synthesize final response using LLM.
+        CRITICAL: Only use ACTUAL data from db_result - NEVER hallucinate.
+        """
         try:
             query = state["query"]
             db_result = state.get("db_result", {})
             agent_results = state.get("agent_results", {})
             
-            # Build context
+            # =====================================================
+            # CRITICAL: Check if we have real data
+            # =====================================================
+            data = db_result.get("data", []) if db_result else []
+            row_count = len(data)
+            sql_query = db_result.get("sql_query", "N/A") if db_result else "N/A"
+            
+            # If no data, return the pre-built zero-row message
+            if row_count == 0:
+                if not state.get("final_answer"):
+                    state["final_answer"] = f"""**No data found for your query.**
+
+SQL Query executed:
+```sql
+{sql_query}
+```
+
+**Result:** 0 rows returned. Please try different search criteria.
+"""
+                state["status"] = "success_no_data"
+                logger.info("📭 Synthesize: No data to analyze, returning zero-row message")
+                return state
+            
+            # =====================================================
+            # Build context from REAL data only
+            # =====================================================
             context_parts = []
             
-            if db_result and db_result.get("data"):
-                data_count = len(db_result['data'])
-                data_summary = f"Database returned {data_count} records.\n"
-                
-                # If small dataset, provide all data for table generation
-                if data_count <= 50:
-                    data_summary += f"Full Data:\n"
-                    for i, row in enumerate(db_result["data"], 1):
-                        data_summary += f"{i}. {row}\n"
-                else:
-                    data_summary += f"Sample data (first 10 rows):\n"
-                    for i, row in enumerate(db_result["data"][:10], 1):
-                        data_summary += f"{i}. {row}\n"
-                
-                context_parts.append(data_summary)
+            data_summary = f"**Database Query Results:** {row_count} rows returned.\n\n"
+            data_summary += f"**SQL Query:**\n```sql\n{sql_query}\n```\n\n"
             
+            # If small dataset, provide all data for accurate analysis
+            if row_count <= 50:
+                data_summary += f"**Full Data ({row_count} rows):**\n"
+                for i, row in enumerate(data, 1):
+                    # Convert any special types to strings
+                    clean_row = {}
+                    for k, v in row.items():
+                        if isinstance(v, Decimal):
+                            clean_row[k] = float(v)
+                        elif hasattr(v, 'isoformat'):
+                            clean_row[k] = v.isoformat()
+                        else:
+                            clean_row[k] = v
+                    data_summary += f"{i}. {clean_row}\n"
+            else:
+                data_summary += f"**Sample data (first 15 of {row_count} rows):**\n"
+                for i, row in enumerate(data[:15], 1):
+                    clean_row = {}
+                    for k, v in row.items():
+                        if isinstance(v, Decimal):
+                            clean_row[k] = float(v)
+                        elif hasattr(v, 'isoformat'):
+                            clean_row[k] = v.isoformat()
+                        else:
+                            clean_row[k] = v
+                    data_summary += f"{i}. {clean_row}\n"
+                data_summary += f"... and {row_count - 15} more rows.\n"
+            
+            context_parts.append(data_summary)
+            
+            # Add agent analysis if available (from clean architecture)
             if agent_results:
+                # Check for DatabaseAgent's analysis first
+                if agent_results.get("analysis"):
+                    context_parts.append(f"**Database Agent Analysis:**\n{agent_results['analysis']}")
+                
+                # Show active domains that provided hints
+                if agent_results.get("active_domains"):
+                    context_parts.append(f"**Active Domain Experts:** {', '.join(agent_results['active_domains'])}")
+                
+                # Legacy support for other agent results
                 for agent_name, result in agent_results.items():
-                    insight = result.get("answer", result.get("analysis", ""))
-                    if insight:
-                        context_parts.append(f"{agent_name.title()} Analysis:\n{insight}")
+                    if agent_name in ["active_domains", "domain_hints_count", "analysis", "database"]:
+                        continue  # Skip metadata
+                    if isinstance(result, dict):
+                        insight = result.get("answer", result.get("analysis", ""))
+                        if insight:
+                            context_parts.append(f"**{agent_name.title()} Analysis:**\n{insight}")
             
             full_context = "\n\n".join(context_parts)
             
-            # System prompt
+            # =====================================================
+            # System prompt - CRITICAL anti-hallucination rules
+            # =====================================================
             system_prompt = """You are Plan IQ, a professional supply chain intelligence expert.
 
-Provide clear, well-structured insights in a professional business format.
+**CRITICAL ANTI-HALLUCINATION RULES (MUST FOLLOW):**
 
-**CRITICAL FORMATTING RULES:**
+1. **ONLY use data provided in the Database Query Results** - NEVER invent values
+2. **Use EXACT values from the data** - store IDs, numbers, percentages must match exactly
+3. **If you see store IDs like ST0050, use ST0050** - do NOT convert to city names
+4. **If the data shows 0 or NULL values, report them as-is** - zero is valid data!
+5. **Count the actual rows** - if data shows 5 rows, say "5 records", not "several"
 
-1. **Use Markdown Tables** for ANY data with multiple items:
-   - Always create tables with proper | separators
-   - Include header row with column names
-   - Align data in rows
-   - Example:
-     ```
-     | Region | Sales | Change |
-     |--------|-------|--------|
-     | Northeast | $1,200,000 | +12% |
-     | Southeast | $950,000 | +8% |
-     ```
+**RESPONSE STRUCTURE:**
 
-2. **Structure Your Response:**
-   - **Executive Summary** (2-3 sentences at top)
-   - **Detailed Analysis** (with data table if applicable)
-   - **Key Insights** (bullet points)
-   - **Recommendations** (actionable next steps)
+## Summary
+(2-3 sentences summarizing the key findings from the ACTUAL data)
 
-3. **Professional Tone:**
-   - Use business language
-   - Include specific numbers and percentages
-   - Cite data sources when relevant
-   - Be concise but comprehensive
+### Data Analysis
+(Create a markdown table using the EXACT data provided)
 
-4. **Visual Hierarchy:**
-   - Use ## for main sections
-   - Use ### for subsections
-   - Use **bold** for key metrics
-   - Use bullet points for lists
-
-5. **If Chart Requested:**
-   - Mention "A visualization is provided below" at the end
-   - Do NOT describe what the chart should look like
-   - Focus on insights the chart reveals
-
-Example Response Format (When Data Has Values):
-```
-## Weather Impact Analysis
-
-**Executive Summary:** Analysis of 15 store locations shows mixed weather-driven demand patterns. Store ST0050 exhibits the highest positive impact (+22%), while Store ST0551 shows the largest decline (-15%). The majority of stores (8 locations) show zero weather impact, indicating stable demand conditions.
-
-### Store-Level Weather Impact
-
-| Store ID | Region | State | WDD Change | Interpretation |
-|----------|--------|-------|------------|----------------|
-| ST0050 | Northeast | MA | +22.0% | Strong positive weather impact |
-| ST4961 | Mountain | CO | +18.0% | Significant weather-driven uplift |
-| ST0551 | Southeast | FL | -15.0% | Weather suppressing demand |
-| ST0100 | Northeast | MA | 0.0% | No weather impact detected |
+| Column1 | Column2 | Column3 |
+|---------|---------|---------|
+| exact_value | exact_value | exact_value |
 
 ### Key Insights
-- **High Impact Stores**: 2 stores show significant positive weather effects (>15%)
-- **Negative Impact**: 1 store experiencing weather-driven demand decline
-- **Stable Stores**: 8 stores show zero weather impact (normal demand patterns)
-- **Regional Variation**: Northeast and Mountain regions more weather-sensitive
+- Bullet points based ONLY on the data shown
+- Include specific numbers from the results
+- Note any patterns or anomalies
 
 ### Recommendations
-1. **ST0050 & ST4961**: Increase inventory 15-20% to capitalize on weather-driven demand surge
-2. **ST0551**: Reduce seasonal inventory, shift marketing to weather-resilient products
-3. **Zero-Impact Stores**: Maintain normal inventory levels, monitor for pattern changes
+- Actionable suggestions based on the data
+- Reference specific values when making recommendations
 
-A visualization is provided below.
-```
+**INTERPRETING SPECIAL VALUES:**
+- wdd_uplift = 0 means "no weather impact" (valid insight, not missing data)
+- NULL values should be mentioned as "data not available for this field"
+- Negative percentages = decline, positive = growth
 
-Example Response Format (When ALL Values Are Zero):
-```
-## Weather Impact Analysis
+**IF CHART WAS GENERATED:**
+Add at the end: "A visualization is provided below."
 
-**Executive Summary:** Analysis of 25 products across 10 Northeast stores shows zero weather-driven demand variation for the upcoming month. All products maintain wdd_uplift_ratio of 0.0, indicating demand is expected to match normal patterns with no weather-related deviations.
-
-### Product Weather Impact Summary
-
-| Product | Category | Store Count | WDD Uplift Ratio | Interpretation |
-|---------|----------|-------------|------------------|----------------|
-| Milk | Perishable | 10 stores | 0.0 | No weather impact |
-| Ice Cream | Perishable | 8 stores | 0.0 | No weather impact |
-| Grocery Sector | N/A | 10 stores | 0.0 | No weather impact |
-
-### Key Insights
-- **Stable Demand**: No products show weather-driven uplift for the next month
-- **Normal Planning**: Standard forecasting models apply (no weather adjustments needed)
-- **Consistent Pattern**: All Northeast stores show identical zero-impact trend
-
-### Recommendations
-1. **Inventory Planning**: Use normal demand forecasts (metric_nrm) without weather premiums
-2. **Monitor Changes**: Re-evaluate if weather patterns shift significantly
-3. **Focus on Other Factors**: Prioritize promotions, events, and seasonality over weather
-```
-
-Remember: Zero values ARE valid data insights - they mean "no weather impact" not "no data"!
-"""
+Remember: Your credibility depends on accuracy. Never guess or fill in gaps."""
             
             user_prompt = f"""User Query: {query}
 
-Database Query Results and Analysis:
 {full_context}
 
-**CRITICAL INSTRUCTIONS:**
-1. Use ONLY the data provided above from the database query results
-2. Do NOT invent or hallucinate any store names, locations, numbers, or statistics
-3. If the data contains store IDs (e.g., ST0050), use those EXACT IDs - do NOT convert to city names
-4. Create a markdown table showing the EXACT data from the query results
-5. Base all insights and recommendations ONLY on the actual data provided
+**YOUR TASK:**
+1. Analyze ONLY the data shown above
+2. Create a response with the exact values from the results
+3. Do NOT add any information not present in the data
+4. If the query asked for something not in the results, note what's missing
 
-**DATA INTERPRETATION RULES:**
-6. IF the database returned rows with values → THAT IS VALID DATA, analyze it!
-7. ONLY say "No data available" if the query returned ZERO rows (empty result set)
-8. If you see values like "wdd_uplift_ratio: 0" or "wdd_vs_normal_pct_change: 0.0":
-   - This means ZERO WEATHER IMPACT (no demand change)
-   - It does NOT mean "no data" - it's a valid business insight!
-   - Interpret: "No significant weather-driven demand change detected"
-9. If you see NULL or missing values in specific columns, mention those specific columns are unavailable
-10. Always analyze the data you DO have, even if some expected changes are zero
-
-**WEATHER-DRIVEN DEMAND (WDD) INTERPRETATION:**
-- **wdd_vs_normal_pct_change** or **wdd_uplift_ratio** = (WDD Sales - Normal Sales) / Normal Sales
-- Positive value (e.g., 0.22) = +22% increase due to weather
-- Negative value (e.g., -0.15) = -15% decrease due to weather  
-- Zero value (0.0) = No weather impact detected (demand matches normal)
-- This is calculated using either metric_nrm (< 4 weeks) or metric_ly (> 4 weeks)
-
-Provide a comprehensive answer with insights and recommendations based STRICTLY on the actual database results."""
+Generate a professional, accurate response:"""
             
             response = self.client.chat.completions.create(
                 model=settings.OPENAI_MODEL_NAME,
@@ -800,21 +889,36 @@ Provide a comprehensive answer with insights and recommendations based STRICTLY 
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3,  # Lower temperature to reduce hallucination
-                max_tokens=1000  # Increased for detailed tables
+                temperature=0.2,  # Very low temperature to minimize hallucination
+                max_tokens=1200
             )
             
             state["final_answer"] = response.choices[0].message.content
             state["status"] = "success"
+            logger.info(f"✅ Response synthesized for {row_count} rows of data")
             
         except Exception as e:
-            logger.error(f"Response synthesis failed: {e}")
-            # Fallback to simple answer
+            logger.error(f"Response synthesis failed: {e}", exc_info=True)
+            # Fallback: just describe what we found
             if state.get("db_result") and state["db_result"].get("data"):
-                state["final_answer"] = f"Found {len(state['db_result']['data'])} records in the database."
+                data_count = len(state["db_result"]["data"])
+                sql = state["db_result"].get("sql_query", "N/A")
+                state["final_answer"] = f"""**Query Results**
+
+Found **{data_count} records** from the database.
+
+**SQL Query:**
+```sql
+{sql}
+```
+
+**Sample Data:**
+{state["db_result"]["data"][:5]}
+
+(Response synthesis encountered an error, showing raw results above)
+"""
             else:
-                # state["final_answer"] = "I processed your query but couldn't generate a detailed response."
-                state["final_answer"] = db_result.get("answer", "No data available for your query. Please try different search criteria.")
+                state["final_answer"] = "Query processed but response generation failed. Please try again."
             state["status"] = "partial_success"
         
         return state

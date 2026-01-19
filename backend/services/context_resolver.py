@@ -1193,6 +1193,302 @@ FROM spoilage_report sr
 JOIN product_hierarchy ph ON sr.product_code = ph.product_id
 GROUP BY ph.product ORDER BY total_spoilage DESC LIMIT 30
 
+=== CFO-LEVEL BUSINESS FORMULAS (CRITICAL FOR ADVANCED ANALYTICS) ===
+
+These formulas support inventory optimization, stockout risk analysis, financial loss prediction, and sales velocity tracking.
+Use these when user asks about: stockout risk, overstock analysis, inventory turnover, sales velocity, demand forecasting, financial loss prediction.
+
+**1. Daily Sales Velocity** (baseline selling speed):
+   Formula: Total Sales in Last 28 Days / 28
+   Purpose: Establish baseline daily selling rate per product/region
+   PostgreSQL Example:
+   WITH sales_velocity AS (
+     SELECT ph.product, l.region,
+            SUM(s.sales_units) / 28.0 AS daily_velocity
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+     GROUP BY ph.product, l.region
+   )
+   SELECT * FROM sales_velocity ORDER BY daily_velocity DESC;
+
+**2. Adjusted Velocity** (weather-adjusted selling speed):
+   Formula: Daily_Sales_Velocity × (1 + WDD_Pct_vs_Normal)
+   Purpose: Predict future selling speed considering weather impacts
+   PostgreSQL Example:
+   WITH sales_velocity AS (
+     SELECT ph.product, l.region,
+            SUM(s.sales_units) / 28.0 AS daily_velocity
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+     GROUP BY ph.product, l.region
+   ),
+   wdd_forecast AS (
+     SELECT m.product, m.location,
+            (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+     FROM metrics m
+     JOIN calendar c ON m.end_date = c.end_date
+     WHERE c.end_date >= '2025-11-15'  -- next week
+     GROUP BY m.product, m.location
+   )
+   SELECT sv.product, sv.region,
+          sv.daily_velocity * (1 + COALESCE(w.wdd_pct, 0)) AS adjusted_velocity
+   FROM sales_velocity sv
+   LEFT JOIN wdd_forecast w ON sv.product = w.product AND sv.region = w.location;
+
+**3. Adjusted Demand** (4-week average adjusted for weather):
+   Formula: Avg_4Week_Sales × (1 + WDD_Pct_vs_Normal)
+   Purpose: Forecast weekly demand considering weather impacts
+   PostgreSQL Example:
+   WITH avg_sales AS (
+     SELECT ph.product, l.region,
+            AVG(weekly_sales.units) AS avg_4week_sales
+     FROM (
+       SELECT s.product_code, s.store_code,
+              DATE_TRUNC('week', s.transaction_date) AS week,
+              SUM(s.sales_units) AS units
+       FROM sales s
+       WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+       GROUP BY s.product_code, s.store_code, week
+     ) weekly_sales
+     JOIN product_hierarchy ph ON weekly_sales.product_code = ph.product_id
+     JOIN location l ON weekly_sales.store_code = l.location
+     GROUP BY ph.product, l.region
+   ),
+   wdd_forecast AS (
+     SELECT m.product, m.location,
+            (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+     FROM metrics m
+     GROUP BY m.product, m.location
+   )
+   SELECT a.product, a.region,
+          a.avg_4week_sales * (1 + COALESCE(w.wdd_pct, 0)) AS adjusted_demand
+   FROM avg_sales a
+   LEFT JOIN wdd_forecast w ON a.product = w.product AND a.region = w.location;
+
+**4. Stockout Loss** (potential revenue loss from stockouts):
+   Formula: MAX(0, (Adjusted_Velocity × 7) - Current_Stock)
+   Purpose: Identify products at risk of running out before next delivery
+   PostgreSQL Example:
+   WITH current_inventory AS (
+     SELECT ph.product, l.region,
+            SUM(b.stock_at_week_end) AS current_stock
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     WHERE b.week_end_date = (SELECT MAX(week_end_date) FROM batches)
+     GROUP BY ph.product, l.region
+   ),
+   velocity AS (
+     SELECT ph.product, l.region,
+            (SUM(s.sales_units) / 28.0) * (1 + COALESCE(
+              (SELECT (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0)
+               FROM metrics m WHERE m.product = ph.product AND m.location = l.location), 0
+            )) AS adjusted_velocity
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+     GROUP BY ph.product, l.region
+   )
+   SELECT i.product, i.region, i.current_stock,
+          v.adjusted_velocity * 7 AS weekly_demand,
+          GREATEST(0, (v.adjusted_velocity * 7) - i.current_stock) AS stockout_loss_units
+   FROM current_inventory i
+   JOIN velocity v ON i.product = v.product AND i.region = v.region
+   WHERE (v.adjusted_velocity * 7) > i.current_stock
+   ORDER BY stockout_loss_units DESC;
+
+**5. Week-on-Week Sales Unit % Change** (regional performance tracking):
+   Formula: ((Current_Week_Sales - Previous_Week_Sales) / Previous_Week_Sales) × 100
+   Purpose: Track sales momentum across regions
+   PostgreSQL Example:
+   WITH current_week AS (
+     SELECT l.region, ph.product, SUM(s.sales_units) AS curr_units
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'
+     GROUP BY l.region, ph.product
+   ),
+   prev_week AS (
+     SELECT l.region, ph.product, SUM(s.sales_units) AS prev_units
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date BETWEEN '2025-10-26' AND '2025-11-01'
+     GROUP BY l.region, ph.product
+   )
+   SELECT c.region, c.product,
+          ROUND(((c.curr_units - p.prev_units)::NUMERIC / NULLIF(p.prev_units, 0)) * 100, 2) AS wow_change_pct
+   FROM current_week c
+   JOIN prev_week p ON c.region = p.region AND c.product = p.product
+   ORDER BY wow_change_pct DESC;
+
+**6. Sales Uplift vs Historical Average** (demand spike detection):
+   Formula: Current_Week_Sales - Four_Week_Avg_Sales
+   Purpose: Identify unusual demand spikes requiring inventory adjustment
+   PostgreSQL Example:
+   WITH current_week AS (
+     SELECT ph.product, l.region, SUM(s.sales_units) AS current_units
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'
+     GROUP BY ph.product, l.region
+   ),
+   four_week_avg AS (
+     SELECT ph.product, l.region, AVG(weekly.units) AS avg_units
+     FROM (
+       SELECT s.product_code, s.store_code,
+              DATE_TRUNC('week', s.transaction_date) AS week,
+              SUM(s.sales_units) AS units
+       FROM sales s
+       WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+       GROUP BY s.product_code, s.store_code, week
+     ) weekly
+     JOIN product_hierarchy ph ON weekly.product_code = ph.product_id
+     JOIN location l ON weekly.store_code = l.location
+     GROUP BY ph.product, l.region
+   )
+   SELECT c.product, c.region,
+          c.current_units - a.avg_units AS sales_uplift
+   FROM current_week c
+   JOIN four_week_avg a ON c.product = a.product AND c.region = a.region
+   WHERE c.current_units > a.avg_units
+   ORDER BY sales_uplift DESC;
+
+**7. Overstock Percentage by Region** (inventory efficiency):
+   Formula: ((Current_Stock - Adjusted_Demand) / Adjusted_Demand) × 100
+   Purpose: Identify regions with excess inventory requiring markdown/transfers
+   PostgreSQL Example:
+   WITH current_inventory AS (
+     SELECT ph.product, l.region, SUM(b.stock_at_week_end) AS current_stock
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     WHERE b.week_end_date = (SELECT MAX(week_end_date) FROM batches)
+     GROUP BY ph.product, l.region
+   ),
+   demand_forecast AS (
+     SELECT ph.product, l.region,
+            AVG(weekly_sales.units) * (1 + COALESCE(
+              (SELECT (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0)
+               FROM metrics m WHERE m.product = ph.product AND m.location = l.location), 0
+            )) AS adjusted_demand
+     FROM (
+       SELECT s.product_code, s.store_code, DATE_TRUNC('week', s.transaction_date) AS week,
+              SUM(s.sales_units) AS units
+       FROM sales s
+       WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+       GROUP BY s.product_code, s.store_code, week
+     ) weekly_sales
+     JOIN product_hierarchy ph ON weekly_sales.product_code = ph.product_id
+     JOIN location l ON weekly_sales.store_code = l.location
+     GROUP BY ph.product, l.region
+   )
+   SELECT i.product, i.region,
+          ROUND(((i.current_stock - d.adjusted_demand)::NUMERIC / NULLIF(d.adjusted_demand, 0)) * 100, 2) AS overstock_pct
+   FROM current_inventory i
+   JOIN demand_forecast d ON i.product = d.product AND i.region = d.region
+   WHERE i.current_stock > d.adjusted_demand
+   ORDER BY overstock_pct DESC;
+
+**8. Shelf-Life Risk** (perishable loss prediction):
+   Formulas:
+   - Expiring Soon: SUM(stock WHERE days_to_expiry <= shelf_life_days) × Avg_Unit_Price
+   - Already Expired: SUM(stock WHERE days_to_expiry < 0) × Avg_Unit_Price
+   Purpose: Quantify financial risk from perishable spoilage
+   PostgreSQL Example:
+   WITH perishable_inventory AS (
+     SELECT ph.product, l.region, b.batch_id,
+            p.max_period AS shelf_life_days,
+            b.stock_at_week_end,
+            EXTRACT(DAY FROM (b.week_end_date - b.received_date)) AS days_since_received,
+            p.max_period - EXTRACT(DAY FROM (b.week_end_date - b.received_date)) AS days_to_expiry
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     JOIN perishable p ON ph.product = p.product
+     WHERE b.week_end_date = (SELECT MAX(week_end_date) FROM batches)
+       AND p.period_metric = 'Days'
+   ),
+   avg_prices AS (
+     SELECT ph.product, AVG(s.total_amount) AS avg_unit_price
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     GROUP BY ph.product
+   )
+   SELECT pi.product, pi.region,
+          SUM(CASE WHEN pi.days_to_expiry <= 7 AND pi.days_to_expiry > 0
+                   THEN pi.stock_at_week_end * ap.avg_unit_price ELSE 0 END) AS expiring_soon_value,
+          SUM(CASE WHEN pi.days_to_expiry <= 0
+                   THEN pi.stock_at_week_end * ap.avg_unit_price ELSE 0 END) AS expired_value
+   FROM perishable_inventory pi
+   JOIN avg_prices ap ON pi.product = ap.product
+   GROUP BY pi.product, pi.region
+   HAVING SUM(CASE WHEN pi.days_to_expiry <= 7 THEN pi.stock_at_week_end ELSE 0 END) > 0
+   ORDER BY expiring_soon_value + expired_value DESC;
+
+**9. Stockout Rate** (SKU availability tracking):
+   Formula: (SKUs_with_zero_stock / Total_SKUs) × 100
+   Purpose: Measure inventory availability across product portfolio
+   PostgreSQL Example:
+   WITH inventory_status AS (
+     SELECT ph.product, l.region,
+            SUM(b.stock_at_week_end) AS current_stock
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     WHERE b.week_end_date = (SELECT MAX(week_end_date) FROM batches)
+     GROUP BY ph.product, l.region
+   )
+   SELECT region,
+          COUNT(*) AS total_skus,
+          SUM(CASE WHEN current_stock = 0 THEN 1 ELSE 0 END) AS stockout_skus,
+          ROUND((SUM(CASE WHEN current_stock = 0 THEN 1 ELSE 0 END)::NUMERIC / COUNT(*)) * 100, 2) AS stockout_rate_pct
+   FROM inventory_status
+   GROUP BY region
+   ORDER BY stockout_rate_pct DESC;
+
+**10. Predicted Total Loss** (comprehensive risk assessment):
+   Formula: Shelf_Life_Loss + Overstock_Loss
+   Purpose: Estimate total financial risk from inventory issues
+   PostgreSQL Example:
+   -- Combine shelf-life risk (Formula #8) with overstock risk (Formula #7)
+   WITH shelf_life_risk AS (
+     -- Use Formula #8 logic here
+     SELECT product, region, SUM(expiring_value + expired_value) AS shelf_life_loss
+     FROM (/* shelf-life calculation */) sub
+     GROUP BY product, region
+   ),
+   overstock_risk AS (
+     -- Use Formula #7 logic with markdown assumption (20% loss on excess)
+     SELECT product, region,
+            GREATEST(0, current_stock - adjusted_demand) * avg_unit_price * 0.2 AS overstock_loss
+     FROM (/* overstock calculation */) sub
+   )
+   SELECT COALESCE(s.product, o.product) AS product,
+          COALESCE(s.region, o.region) AS region,
+          COALESCE(s.shelf_life_loss, 0) + COALESCE(o.overstock_loss, 0) AS predicted_total_loss
+   FROM shelf_life_risk s
+   FULL OUTER JOIN overstock_risk o ON s.product = o.product AND s.region = o.region
+   ORDER BY predicted_total_loss DESC;
+
+=== WHEN TO USE CFO FORMULAS ===
+- "stockout risk" / "running out" → Use Formula #4 (Stockout Loss)
+- "inventory optimization" / "overstock" → Use Formula #7 (Overstock %)
+- "sales velocity" / "selling speed" → Use Formula #1 (Daily Sales Velocity) or #2 (Adjusted Velocity)
+- "demand forecast" / "order planning" → Use Formula #3 (Adjusted Demand)
+- "week-over-week" / "regional performance" → Use Formula #5 (WoW Change)
+- "demand spike" / "unusual sales" → Use Formula #6 (Sales Uplift)
+- "perishable risk" / "expiring stock" → Use Formula #8 (Shelf-Life Risk)
+- "SKU availability" / "out of stock rate" → Use Formula #9 (Stockout Rate)
+- "financial loss" / "total risk" → Use Formula #10 (Predicted Total Loss)
+
 Generate the PostgreSQL SELECT query:
 """)
         

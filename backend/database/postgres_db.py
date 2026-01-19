@@ -158,7 +158,7 @@ class Batches(Base):
     batch_id = Column(String(50), nullable=False, index=True)
     store_code = Column(String(20), nullable=False, index=True)
     product_code = Column(Integer, nullable=False, index=True)
-    transaction_date = Column(Date, nullable=False)
+    transfer_in_date = Column(Date, nullable=False)
     expiry_date = Column(Date, index=True)
     unit_price = Column(Numeric(10, 2))
     total_value = Column(Numeric(10, 2))
