@@ -59,6 +59,22 @@ This Weekend: November 8, 2025 (2025-11-08)
 - "next month" = December 2025
 - "last month" = October 2025
 
+=== CRITICAL TABLE UNDERSTANDING ===
+METRICS TABLE: Contains WDD TREND VALUES (NOT actual sales numbers!)
+- Use to calculate WDD PERCENTAGE, then apply to actual sales
+- metric = Weather-adjusted demand TREND
+- metric_nrm = Normal demand TREND (use for FUTURE ≤4 weeks)
+- metric_ly = Last Year demand TREND (use for PAST/YoY/>4 weeks)
+
+SALES TABLE: Contains ACTUAL transaction data
+- Use for actual revenue, units sold, real sales performance
+- sales_units, total_amount = real transaction values
+
+RECOMMENDED ORDER FORMULA: Last-week sales × (1 + WDD %)
+- Get last_week_sales from SALES table (real units sold)
+- Get WDD % from METRICS table (trend percentage)
+- Multiply: recommended_qty = last_week_sales × (1 + wdd_pct)
+
 === CRITICAL RULES ===
 1. PostgreSQL syntax: LIMIT (not TOP), || for concatenation
 2. ALWAYS use NULLIF(denominator, 0) to prevent division errors
@@ -71,8 +87,8 @@ This Weekend: November 8, 2025 (2025-11-08)
 9. Return ONLY the SQL query, no explanations
 
 === WDD FORMULA SELECTION ===
-- FUTURE queries (next week, forecast): metric vs metric_nrm
-- PAST queries (last week, historical): metric vs metric_ly
+- FUTURE queries (≤4 weeks, next week, forecast): metric vs metric_nrm
+- PAST queries (>4 weeks, last week, historical, YoY): metric vs metric_ly
 
 The detailed schema, examples, and domain hints are provided in the user prompt below."""
 
@@ -266,7 +282,7 @@ The detailed schema, examples, and domain hints are provided in the user prompt 
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=500
+            max_tokens=1500  # Increased for complex multi-CTE queries (was 500)
         )
         
         sql_query = response.choices[0].message.content.strip()
@@ -422,7 +438,7 @@ Generate the SQL query optimized for {chart_type}:
                 {"role": "user", "content": chart_prompt}
             ],
             temperature=0.1,
-            max_tokens=400
+            max_tokens=1200  # Increased for chart-specific queries (was 400)
         )
         
         sql_query = response.choices[0].message.content.strip()
@@ -501,10 +517,13 @@ CRITICAL INSTRUCTIONS:
    - If there's a "recommended_order" column in results, use those exact numbers
    - Calculate specific quantities: "Order 850 units instead of 1000 units"
    
-4. For WASTE PREVENTION questions:
-   - Explain how to adjust ordering based on the demand change percentage
-   - Suggest ordering lead time adjustments
-   - Recommend monitoring stock levels more frequently
+4. For WASTE PREVENTION questions (CRITICAL - Q3 type):
+   - ALWAYS address BOTH demand change AND waste prevention
+   - If there's daily_sales_velocity, current_stock, or days_to_expiry data, analyze it
+   - If there's potential_waste_units or shelf_life_loss, explain the risk
+   - Provide SPECIFIC ordering advice: "Reduce order by X%, monitor stock daily, plan for faster turnover"
+   - Explain lead time adjustments: "Order closer to delivery dates" or "Use smaller, more frequent orders"
+   - If shelf life data exists: "Current stock of X units with Y days shelf life and Z daily sales = potential waste"
    
 5. For DIVERSIFICATION questions:
    - List the top-selling products/categories from the data

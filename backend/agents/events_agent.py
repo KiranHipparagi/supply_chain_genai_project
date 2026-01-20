@@ -158,6 +158,33 @@ JOIN calendar c ON e.event_date = c.end_date
                 "use_as": "WHERE clause"
             })
         
+        # Event proximity checking (for "no events" queries)
+        if any(word in query_lower for word in ["no event", "without event", "no scheduled event", "proximity"]):
+            hints["formulas"].append({
+                "name": "Event Proximity Check (7-day window)",
+                "sql": """LEFT JOIN events e ON l.market = e.market 
+  AND e.event_date BETWEEN c.end_date - INTERVAL '7 days' AND c.end_date""",
+                "description": "Check for events within 7 days of the week ending date",
+                "use_as": "JOIN clause",
+                "filter_no_events": "HAVING COUNT(e.event) = 0"
+            })
+            
+            hints["formulas"].append({
+                "name": "No Events Filter",
+                "sql": "COUNT(e.event) = 0",
+                "description": "Filter for weeks with NO events in proximity",
+                "use_as": "HAVING clause after GROUP BY"
+            })
+        
+        # Event impact (correlation with sales spikes)
+        if any(word in query_lower for word in ["impact", "correlation", "rise", "spike", "increase"]):
+            hints["formulas"].append({
+                "name": "Event Impact Analysis",
+                "sql": "COUNT(DISTINCT e.event) AS nearby_events, STRING_AGG(DISTINCT e.event, ', ') AS event_names",
+                "description": "Count and list events near the analysis period",
+                "requires_groupby": True
+            })
+        
         logger.info(f"🎉 EventsAgent provided {len(hints['formulas'])} event hints")
         return hints
     

@@ -1,0 +1,68 @@
+WITH ideal_beach_weekends AS (
+  -- Step 2: Find ideal beach weather weekends in Miami (2 years historical)
+  SELECT DISTINCT c.end_date
+  FROM calendar c
+  JOIN weekly_weather w ON w.week_end_date = c.end_date
+  JOIN location l ON w.store_id = l.location
+  WHERE l.market ILIKE '%miami%'
+    AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'  -- CRITICAL: 2 years historical
+    AND EXTRACT(DOW FROM c.end_date) = 6  -- Saturday weekends only
+    AND w.tmax_f BETWEEN 80 AND 95  -- Ideal beach temperature
+    AND w.precip_in <= 0.1  -- Low rain (≤0.1 inch)
+    AND w.heatwave_flag = false
+    AND w.heavy_rain_flag = false
+    AND w.cold_spell_flag = false
+    AND w.snow_flag = false
+)
+SELECT 
+  ph.product,
+  ph.category,
+  ph.dept,
+  ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct,
+  COUNT(DISTINCT m.end_date) AS num_ideal_weekends
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN location l ON m.location = l.location
+JOIN ideal_beach_weekends ibw ON m.end_date = ibw.end_date
+WHERE l.market ILIKE '%miami%'
+  AND ph.product IN ('Sandwiches', 'Desserts', 'Hamburgers', 'Ice Cream', 'Eggs')  -- Specific products
+GROUP BY ph.product, ph.category, ph.dept
+HAVING SUM(m.metric_ly) > 0  -- Ensure we have last year baseline
+ORDER BY wdd_vs_ly_pct DESC
+LIMIT 30;
+
+
+
+
+WITH last_week_sales AS (
+    -- Step 1: Get last week's actual sales for Salad Kits
+    SELECT ph.product, SUM(s.sales_units) AS last_week_units
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'
+      AND ph.product = 'Salad Kits'
+      AND l.region = 'northeast'
+    GROUP BY ph.product
+),
+wdd_forecast AS (
+    -- Step 2: Calculate WDD percentage for Salad Kits for next week
+    SELECT m.product,
+           ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_vs_normal_pct
+    FROM metrics m
+    JOIN location l ON m.location = l.location
+    WHERE m.end_date = '2025-11-15'
+      AND m.product = 'Salad Kits'
+      AND l.region = 'northeast'
+    GROUP BY m.product
+)
+-- Step 3: Combine last week's sales and WDD forecast to calculate recommended order
+SELECT 
+    lws.product,
+    lws.last_week_units AS last_week_sales,
+    COALESCE(wf.wdd_vs_normal_pct, 0) AS wdd_change_pct,
+    ROUND(lws.last_week_units * (1 + COALESCE(wf.wdd_vs_normal_pct, 0) / 100), 0) AS recommended_order_qty
+FROM last_week_sales lws
+LEFT JOIN wdd_forecast wf ON lws.product = wf.product
+ORDER BY recommended_order_qty DESC
+LIMIT 30;

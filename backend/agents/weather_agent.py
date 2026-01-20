@@ -154,13 +154,22 @@ SUM(CASE WHEN w.snow_flag THEN 1 ELSE 0 END) AS snow_count
             })
         
         # Beach weather (for food diversification queries)
-        if any(word in query_lower for word in ["beach", "ideal", "miami", "coastal", "summer"]):
+        if any(word in query_lower for word in ["beach", "ideal", "miami", "coastal", "summer", "weekend"]):
             hints["formulas"].append({
                 "name": "Ideal Beach Weather Filter",
                 "sql": "w.tmax BETWEEN 80 AND 95 AND w.tmin >= 65 AND w.precip <= 0.1 AND w.heatwave_flag = false AND w.cold_spell_flag = false AND w.heavy_rain_flag = false AND w.snow_flag = false",
-                "description": "Filter for ideal beach weather conditions",
+                "description": "Filter for ideal beach weather conditions (80-95°F, ≤0.1\" rain, no adverse flags)",
                 "use_as": "WHERE clause condition"
             })
+            
+            # Weekend-specific filtering (Saturday = DOW 6)
+            if "weekend" in query_lower or "saturday" in query_lower:
+                hints["formulas"].append({
+                    "name": "Weekend Filter (Saturday)",
+                    "sql": "EXTRACT(DOW FROM c.end_date) = 6",
+                    "description": "Filter for Saturday week-ending dates (DOW = 6 for Saturday)",
+                    "use_as": "WHERE clause - ensures only weekend dates are selected"
+                })
         
         logger.info(f"🌤️ WeatherAgent provided {len(hints['formulas'])} weather hints")
         return hints

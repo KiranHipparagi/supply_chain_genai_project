@@ -22,17 +22,38 @@ class MetricsAgent:
     - Connect to database directly
     
     Tables this expert knows about:
-    - metrics (primary) - WDD trend data
+    - metrics (primary) - WDD TREND data (NOT actual demand numbers!)
     - product_hierarchy (joins by product name)
     - location (joins by location)
     - calendar (joins by end_date)
+    - sales (for actual sales to calculate recommended orders)
     - weekly_weather (optional for weather flags)
     
-    CRITICAL CONCEPT:
-    - metrics table contains DEMAND TRENDS, not actual sales
-    - metric = Weather-Driven Demand prediction
-    - metric_nrm = Normal demand (no weather impact) - use for FUTURE
-    - metric_ly = Last Year demand - use for PAST/YoY comparisons
+    CRITICAL CONCEPT - METRICS TABLE EXPLAINED:
+    ===========================================
+    The metrics table contains WEEKLY WDD TREND DATA for analyzing 
+    spikes or dips in demand due to WEATHER ONLY.
+    
+    These metric numbers are NOT actual demand numbers - they are 
+    TREND VALUES used to see weather-driven patterns.
+    
+    - metric = Weather-Driven Demand (WDD) trend value
+    - metric_nrm = Normal demand trend (baseline, no weather impact)
+    - metric_ly = Last Year demand trend
+    
+    WDD FORMULA SELECTION RULES:
+    - Short-term (≤4 weeks, FUTURE): Use metric vs metric_nrm
+      Formula: (SUM(metric) - SUM(metric_nrm)) / NULLIF(SUM(metric_nrm), 0) * 100
+      
+    - Long-term (>4 weeks) OR Historical/YoY: Use metric vs metric_ly
+      Formula: (SUM(metric) - SUM(metric_ly)) / NULLIF(SUM(metric_ly), 0) * 100
+    
+    RECOMMENDED ORDER FORMULA (CRITICAL!):
+    =====================================
+    Adjusted Qty = Last-week sales × (1 + WDD %)
+    
+    This uses ACTUAL sales from sales table multiplied by WDD percentage
+    to recommend ordering volume for the coming week.
     """
     
     # Domain keywords
@@ -41,21 +62,31 @@ class MetricsAgent:
         "demand forecast", "forecast demand", "expected demand",
         "weather impact on demand", "weather affect demand",
         "metric", "metric_nrm", "metric_ly",
-        "adjusted demand", "adjusted velocity",
+        "adjusted demand", "adjusted velocity", "adjusted qty",
         "demand trend", "demand change", "demand uplift",
-        "weather impact", "weather effect"
+        "weather impact", "weather effect",
+        "recommended order", "ordering volume", "procurement", "reorder",
+        # Add patterns that indicate WDD analysis
+        "below-normal demand", "above-normal demand", "normal demand",
+        "higher-than-normal", "lower-than-normal",
+        "demand next week", "demand next month", "demand last week",
+        "demand vs normal", "demand vs last year",
+        "weather-driven", "weather pattern",
+        # Year-over-year WDD patterns
+        "year-over-year", "yoy", "vs last year", "vs ly",
+        "best performance", "strongest performance", "highest performance"
     ]
     
     # Combined context (weather + demand)
     WEATHER_DEMAND_COMBO = {
-        "weather_words": ["weather", "heatwave", "cold spell", "rain", "temperature"],
-        "demand_words": ["demand", "forecast", "expect", "impact", "uplift", "trend"]
+        "weather_words": ["weather", "heatwave", "cold spell", "rain", "temperature", "forecast", "pattern", "based on"],
+        "demand_words": ["demand", "forecast", "expect", "impact", "uplift", "trend", "order", "ordering", "normal", "performance"]
     }
     
     # Exclude actual sales queries
     EXCLUDE_KEYWORDS = [
-        "revenue", "sold units", "sales amount", "total amount",
-        "how much sold", "units sold", "sales transaction", "actual sales"
+        "revenue only", "sold units only", "sales amount only",
+        "how much sold", "units sold count"
     ]
     
     def __init__(self):
@@ -90,30 +121,35 @@ class MetricsAgent:
             "agent": "metrics",
             "domain": "weather_driven_demand",
             "primary_table": "metrics",
-            "description": "Weather-Driven Demand (WDD) analysis - demand TRENDS, not actual sales",
+            "description": "Weather-Driven Demand (WDD) TREND analysis - NOT actual sales numbers!",
             
             # Table schema hints
             "table_schema": """
--- METRICS TABLE (WDD Demand Trends - NOT actual sales!)
+-- METRICS TABLE (WDD Demand TRENDS - NOT actual sales numbers!)
+-- These are TREND VALUES for weather impact analysis, not real demand
 metrics (
     product VARCHAR,           -- Product name (joins with product_hierarchy.product)
     location VARCHAR,          -- Store ID (joins with location.location)
     end_date DATE,             -- Week ending date (joins with calendar.end_date)
-    metric NUMERIC,            -- Weather-Driven Demand prediction
-    metric_nrm NUMERIC,        -- Normal demand (baseline, no weather) - USE FOR FUTURE
-    metric_ly NUMERIC          -- Last Year demand - USE FOR PAST/YoY
+    metric NUMERIC,            -- WDD trend value (weather-adjusted)
+    metric_nrm NUMERIC,        -- Normal demand trend (baseline) - USE FOR SHORT-TERM FUTURE ≤4 weeks
+    metric_ly NUMERIC          -- Last Year demand trend - USE FOR LONG-TERM >4 weeks OR Historical/YoY
 )
 
--- CRITICAL: This is DIFFERENT from sales table!
--- metrics = demand TRENDS for forecasting
--- sales = actual TRANSACTIONS for reporting
+-- CRITICAL UNDERSTANDING:
+-- metric numbers are NOT actual demand - they're TREND VALUES
+-- Use metrics table to calculate WDD PERCENTAGE, then apply to actual sales
+
+-- WDD FORMULA SELECTION:
+-- Short-term (≤4 weeks, FUTURE): (SUM(metric) - SUM(metric_nrm)) / NULLIF(SUM(metric_nrm), 0) * 100
+-- Long-term (>4 weeks) OR Historical: (SUM(metric) - SUM(metric_ly)) / NULLIF(SUM(metric_ly), 0) * 100
 """,
             
             # Key columns
             "key_columns": {
-                "metric": "WDD prediction (weather-adjusted demand)",
-                "metric_nrm": "Normal demand baseline (use for FUTURE/short-term ≤4 weeks)",
-                "metric_ly": "Last Year demand (use for PAST/YoY/long-term >4 weeks)",
+                "metric": "WDD trend value (NOT actual demand)",
+                "metric_nrm": "Normal demand trend (use for FUTURE ≤4 weeks)",
+                "metric_ly": "Last Year demand trend (use for PAST/YoY/>4 weeks)",
                 "product": "Product name (VARCHAR) - joins with product_hierarchy.product",
                 "location": "Store ID (VARCHAR) - joins with location.location",
                 "end_date": "Week ending date (DATE) - joins with calendar.end_date"
@@ -180,6 +216,121 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
                 "requires_cte": True,
                 "cte_hint": "First calculate avg_4week_sales from sales, then join with WDD from metrics"
             })
+        
+        # CRITICAL: Recommended Order / Adjusted Qty formula
+        # This is the testing team's official formula for Q5 and similar queries
+        if any(word in query_lower for word in ["recommend", "order", "reorder", "procurement", "adjusted qty", "ordering volume", "should order", "how much to order", "prevent waste", "adjust ordering", "next seven days", "next week", "coming week"]):
+            hints["formulas"].append({
+                "name": "Recommended Order / Adjusted Qty (Q5 Type)",
+                "sql": """
+-- ⚠️ CRITICAL: Use ACTUAL sales from sales table, NOT metric_ly!
+-- STEP 1: Get last week's ACTUAL sales from sales table
+WITH last_week_sales AS (
+    SELECT ph.product, l.region, l.market,
+           SUM(s.sales_units) AS last_week_units
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'  -- Last week
+    GROUP BY ph.product, l.region, l.market
+),
+-- STEP 2: Get WDD percentage from metrics table for NEXT week
+wdd_forecast AS (
+    SELECT ph.product, l.region, l.market,
+           (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    WHERE m.end_date = '2025-11-15'  -- Next week
+    GROUP BY ph.product, l.region, l.market
+)
+-- STEP 3: Apply formula: Last-week sales × (1 + WDD %)
+SELECT 
+    lws.product, lws.market, lws.region,
+    lws.last_week_units AS last_week_sales,
+    ROUND(wf.wdd_pct * 100, 2) AS wdd_change_pct,
+    ROUND(lws.last_week_units * (1 + COALESCE(wf.wdd_pct, 0)), 0) AS recommended_order_qty,
+    ROUND((lws.last_week_units * (1 + COALESCE(wf.wdd_pct, 0))) - lws.last_week_units, 0) AS qty_change_vs_last_week
+FROM last_week_sales lws
+LEFT JOIN wdd_forecast wf ON lws.product = wf.product AND lws.market = wf.market
+WHERE lws.last_week_units > 0
+ORDER BY recommended_order_qty DESC
+""",
+                "description": "Recommended Order Qty = Last-week sales × (1 + WDD %)",
+                "critical_note": "❌ NEVER use metric_ly as baseline! ✅ ALWAYS use ACTUAL sales from sales table!",
+                "formula": "Adjusted Qty = Last-week ACTUAL sales × (1 + WDD % vs Normal)",
+                "baseline_source": "sales table (NOT metrics table)",
+                "critical_for": "Q5 - Tampa perishable ordering volume"
+            })
+            
+            # ADDITIONAL: Shelf Life Risk for "prevent waste" or "shrinkage" queries (Q3, Q4 type)
+            if any(word in query_lower for word in ["prevent waste", "adjust ordering", "waste", "perishable", "expir", "shelf life", "shrinkage", "shrink", "increase display", "meet demand"]):
+                hints["formulas"].append({
+                    "name": "Shelf Life Risk + Daily Sales Velocity (Waste/Shrinkage Prevention)",
+                    "sql": """
+-- SHRINKAGE/WASTE RISK ANALYSIS with WDD Impact
+-- CRITICAL: In PostgreSQL, date - date = INTEGER (days), NO need for EXTRACT(DAY FROM ...)
+-- Daily Sales Velocity
+WITH daily_velocity AS (
+    SELECT ph.product, l.region,
+           SUM(s.sales_units) / 28.0 AS daily_sales_velocity
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date >= '2025-10-12'  -- Last 28 days
+    GROUP BY ph.product, l.region
+),
+-- Current Stock & Expiry Info
+-- CRITICAL: p.max_period is TEXT, must cast to INTEGER for arithmetic!
+current_inventory AS (
+    SELECT ph.product, l.region,
+           SUM(b.stock_at_week_end) AS current_stock,
+           MAX(CAST(p.max_period AS INTEGER)) AS shelf_life_days,
+           AVG('2025-11-08'::date - b.transfer_in_date) AS avg_age_days
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    JOIN location l ON b.store_code = l.location
+    LEFT JOIN perishable p ON ph.product = p.product
+    WHERE b.week_end_date = '2025-11-08'  -- Current week
+    GROUP BY ph.product, l.region
+),
+-- WDD Impact for demand change
+wdd_impact AS (
+    SELECT ph.product, l.region,
+           (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100 AS expected_demand_change_pct
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product_code = ph.product_id
+    JOIN location l ON m.store_code = l.location
+    WHERE m.weather_date >= '2025-11-09' AND m.weather_date <= '2025-11-16'  -- Next week forecast
+    GROUP BY ph.product, l.region
+)
+-- Calculate shrinkage/waste risk WITH WDD consideration
+SELECT ci.product, ci.region,
+       ci.current_stock,
+       dv.daily_sales_velocity,
+       ci.shelf_life_days,
+       ROUND(ci.shelf_life_days - ci.avg_age_days) AS days_until_expiry,
+       ROUND(wi.expected_demand_change_pct, 2) AS wdd_change_pct,
+       ROUND(dv.daily_sales_velocity * 7 * (1 + COALESCE(wi.expected_demand_change_pct, 0) / 100), 0) AS projected_weekly_demand,
+       CASE 
+         WHEN ci.shelf_life_days - ci.avg_age_days > 0 THEN
+           GREATEST(0, ci.current_stock - (dv.daily_sales_velocity * (ci.shelf_life_days - ci.avg_age_days)))
+         ELSE ci.current_stock
+       END AS potential_shrinkage_units,
+       ROUND(CASE 
+         WHEN ci.current_stock > 0 THEN
+           GREATEST(0, ci.current_stock - (dv.daily_sales_velocity * (ci.shelf_life_days - ci.avg_age_days))) / ci.current_stock * 100
+         ELSE 0
+       END, 2) AS shrinkage_risk_pct
+FROM current_inventory ci
+JOIN daily_velocity dv ON ci.product = dv.product AND ci.region = dv.region
+LEFT JOIN wdd_impact wi ON ci.product = wi.product AND ci.region = wi.region
+WHERE ci.shelf_life_days IS NOT NULL
+""",
+                    "description": "Calculate shrinkage/waste risk with WDD impact for perishable items",
+                    "requires_join": "batches b JOIN perishable p ON product, metrics m for WDD",
+                    "critical_for": "Q3 (prevent waste) and Q4 (shrinkage risk) analysis"
+                })
         
         # Weather flag correlation
         if any(word in query_lower for word in ["heatwave", "cold spell", "storm", "weather flag"]):

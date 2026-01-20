@@ -30,15 +30,15 @@ class LocationAgent:
         "market", "state", "area", "geographic",
         "northeast", "southeast", "midwest", "southwest", "west",
         "florida", "texas", "california", "new york",
-        "miami", "boston", "chicago", "dallas",
+        "miami", "tampa", "boston", "chicago", "dallas", "san francisco", "los angeles",
         "by region", "by market", "by state", "by store"
     ]
     
     # Known regions (lowercase for matching)
     REGIONS = ["northeast", "southeast", "midwest", "southwest", "west", "south"]
     
-    # Sample markets
-    MARKETS = ["miami, fl", "boston, ma", "chicago, il", "dallas, tx", "los angeles, ca"]
+    # Sample markets (include Tampa, San Francisco)
+    MARKETS = ["miami, fl", "tampa, fl", "boston, ma", "chicago, il", "dallas, tx", "los angeles, ca", "san francisco, ca"]
     
     def __init__(self):
         logger.info("📍 LocationAgent initialized as domain expert")

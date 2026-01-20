@@ -472,16 +472,27 @@ FIRST, carefully determine which type of data the user needs:
 
 === TABLE SCHEMAS ===
 
-METRICS TABLE (Weekly WDD data - for weather-driven demand TRENDS):
+METRICS TABLE (Weekly WDD TREND data - NOT actual sales numbers!):
+================================================================================
+CRITICAL UNDERSTANDING: The metrics table contains TREND VALUES for analyzing 
+weather-driven demand spikes or dips. These numbers are NOT actual sales/demand!
+
 - metrics (id, product, location, end_date, metric, metric_nrm, metric_ly)
   * product = Product name (e.g., 'Hamburgers', 'Coffee & Tea', 'Milk')
   * location = Store ID (e.g., 'ST0050', 'ST2900')
   * end_date = Week ending date (joins with calendar.end_date)
-  * metric = WDD (Weather Driven Demand) trend value
-  * metric_nrm = Normal demand trend (baseline)
-  * metric_ly = Last Year demand trend
-  * NOTE: This is TREND data, not actual sales numbers!
-  * USE FOR: Weather impact analysis, demand forecasting
+  * metric = WDD (Weather Driven Demand) TREND VALUE - weather-adjusted
+  * metric_nrm = Normal demand TREND (baseline, no weather impact) - FOR FUTURE ≤4 weeks
+  * metric_ly = Last Year demand TREND - FOR PAST/YoY/>4 weeks comparisons
+  
+  IMPORTANT: metric numbers are NOT actual demand - they're TREND VALUES!
+  USE metrics table to calculate WDD PERCENTAGE, then apply to actual sales.
+  
+  WDD FORMULA SELECTION RULES:
+  - Short-term (≤4 weeks, FUTURE): (metric - metric_nrm) / metric_nrm * 100
+  - Long-term (>4 weeks) OR Historical/YoY: (metric - metric_ly) / metric_ly * 100
+  
+  USE FOR: Weather impact analysis, WDD percentage calculations, demand trend forecasting
 
 SALES TABLE (Actual transaction-level sales data - REAL PERFORMANCE):
 - sales (id, batch_id, store_code, product_code, transaction_date, sales_units, sales_amount, discount_amount, total_amount)
@@ -624,9 +635,16 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
 PERISHABLE TABLE (Extended perishable product details):
 - perishable (id, product, perishable_id, min_period, max_period, period_metric, storage)
   * product = Perishable product name (e.g., 'Bacon', 'Eggs', 'Milk', 'Ice Cream')
-  * min_period, max_period = Shelf life range (INTEGER)
+  * min_period, max_period = Shelf life range as TEXT (e.g., '7', '14', '30') - MUST CAST TO INTEGER!
   * period_metric = Unit of time ('Days', 'Weeks', 'Months')
   * storage = Storage requirements ('Refrigerate', 'Freeze', 'Pantry', etc.)
+  
+  ⚠️ CRITICAL - SHELF LIFE CALCULATIONS:
+  When doing arithmetic with max_period, ALWAYS cast to integer first:
+  ✅ CORRECT: CAST(p.max_period AS INTEGER) AS shelf_life_days
+  ✅ CORRECT: CAST(p.max_period AS INTEGER) - some_numeric_value
+  ❌ WRONG: p.max_period - some_numeric_value  (TEXT - NUMERIC causes error!)
+  ❌ WRONG: MAX(p.max_period) AS shelf_life_days  (returns TEXT, not INTEGER!)
   
   🔍 PERISHABLE QUERIES:
   - For complete list: JOIN product_hierarchy WITH perishable table
@@ -985,19 +1003,17 @@ LIMIT 20;
 **"Cold Spell / Heatwave Impact + Ordering Recommendations" Queries:**
 Q: "Our store is in Northeast expecting a cold spell. What is the decrease in demand for Salad Kits and how to adjust ordering?"
 → Strategy:
-   1. Use metrics table to get HISTORICAL WDD trend during cold spells (to predict future impact)
+   1. Use metrics table to get WDD trend during cold spells (to show weather impact)
    2. Filter by SPECIFIC product mentioned (Salad Kits) - NOT all products!
    3. Filter by region (northeast)
-   4. Calculate demand change using metric vs metric_nrm (short-term)
-   5. DO NOT filter on future dates - use historical cold spell data to predict impact
-   6. The LLM analysis will provide ordering recommendations based on the % decrease
+   4. Calculate demand change using metric vs metric_nrm (short-term) - this shows the PERCENTAGE change
+   5. For ordering recommendations: Use the WDD % to adjust ACTUAL last-week sales
 
-Example SQL (use HISTORICAL data to predict, NO future date filter):
+Example SQL (WDD percentage analysis):
 SELECT ph.product, l.region,
        ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS demand_change_pct,
-       SUM(m.metric) as forecasted_demand,
-       SUM(m.metric_nrm) as normal_demand,
-       ROUND(SUM(m.metric_nrm) * (1 + (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0)), 0) AS recommended_order
+       SUM(m.metric) as forecasted_trend,
+       SUM(m.metric_nrm) as normal_trend
 FROM metrics m
 JOIN product_hierarchy ph ON m.product = ph.product
 JOIN location l ON m.location = l.location
@@ -1006,9 +1022,12 @@ JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.locatio
 WHERE ph.product = 'Salad Kits'  -- CRITICAL: Filter by EXACT product mentioned!
   AND l.region = 'northeast'
   AND w.cold_spell_flag = true
-  -- NO future date filter! Use all historical cold spell data to predict upcoming impact
 GROUP BY ph.product, l.region
 LIMIT 30;
+
+-- NOTE: For recommended ordering quantity, use the Adjusted Qty formula:
+-- Recommended Qty = Last-week ACTUAL sales × (1 + WDD %)
+-- Get last-week sales from sales table, NOT from metrics!
 
 **"Rise in Sales Without Weather/Event" Queries (Anomaly Detection):**
 Q: "Alert me to products in Columbia, SC that experienced a rise in sales but no weather or event recorded"
@@ -1070,8 +1089,7 @@ Example SQL for WDD + Historical Analysis (NO future date filter - use historica
 SELECT ph.product,
        ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_change_pct,
        SUM(m.metric) as forecasted_demand,
-       SUM(m.metric_nrm) as normal_demand,
-       ROUND(SUM(m.metric_nrm) * (1 + (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0)), 0) AS recommended_order
+       SUM(m.metric_nrm) as normal_demand
 FROM metrics m
 JOIN product_hierarchy ph ON m.product = ph.product
 JOIN location l ON m.location = l.location
@@ -1085,29 +1103,65 @@ GROUP BY ph.product
 ORDER BY wdd_change_pct DESC
 LIMIT 30;
 
-**"Recommended Ordering Volume" Queries:**
+**"Recommended Ordering Volume" Queries (CRITICAL - MUST USE ACTUAL SALES!):**
+===================================================================================
 Q: "What is the recommended ordering volume for perishables in Tampa considering weather forecast?"
-→ Strategy:
-   1. Get HISTORICAL WDD data from metrics table to predict future
-   2. Use historical sales volume as baseline
-   3. Calculate recommended order = baseline * (1 + wdd_change_pct/100)
-   4. DO NOT filter on future dates - use historical data to predict!
-   5. Present both the forecast and the calculated recommendation
+Q: "What should we order for next week considering weather?"
+Q: "Recommend ordering quantity for perishables"
 
-Example SQL (use HISTORICAL data, NO future date filter):
-SELECT ph.product,
-       SUM(m.metric_nrm) as baseline_demand,
-       SUM(m.metric) as forecasted_demand,
-       ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS change_pct,
-       ROUND(SUM(m.metric_nrm) * (1 + (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0)), 0) AS recommended_order
-FROM metrics m
-JOIN product_hierarchy ph ON m.product = ph.product
-JOIN location l ON m.location = l.location
-WHERE ph.category = 'Perishable'
-  AND l.market ILIKE '%tampa%'
-  -- Use historical data to calculate average baseline and forecast
-GROUP BY ph.product
-ORDER BY change_pct DESC
+⚠️ CRITICAL FORMULA (from Testing Team) - DO NOT USE metric_nrm OR metric_ly AS BASELINE!
+===================================================================================
+Adjusted Qty = Last-week ACTUAL sales × (1 + WDD %)
+
+This formula MUST use:
+1. ACTUAL sales from SALES TABLE (last week) as the baseline - NOT metric_nrm or metric_ly!
+2. WDD percentage from metrics table (for next week) as the multiplier
+3. NEVER use metric_nrm or metric_ly as the baseline - they are TREND values, not real sales!
+
+WRONG (DO NOT DO THIS - Q5 ERROR):
+❌ metric_nrm * (1 + wdd_pct) AS recommended_order  -- WRONG! metric_nrm is NOT real sales
+❌ SUM(m.metric_ly) * (1 + ...) AS recommended_order  -- WRONG! metric_ly is last YEAR metrics, NOT last week sales
+❌ SUM(m.metric_nrm) * (1 + ...) AS recommended_order  -- WRONG!
+
+CORRECT (ALWAYS DO THIS FOR Q5):
+✅ last_week_sales.units * (1 + wdd_pct) AS recommended_order  -- Uses REAL sales from sales table!
+✅ FROM sales s WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'  -- Last week ACTUAL sales
+
+→ Strategy:
+   1. Get ACTUAL SALES from sales table for last week (transaction_date BETWEEN '2025-11-02' AND '2025-11-08')
+   2. Get WDD % from metrics table for next week (metric vs metric_nrm)
+   3. Calculate: recommended_order = last_week_sales × (1 + WDD_pct)
+
+Example SQL (CORRECT approach - MUST use CTE pattern with sales table):
+WITH last_week_sales AS (
+    -- Get ACTUAL sales from sales table (NOT from metrics!)
+    SELECT ph.product, SUM(s.sales_units) as last_week_units
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'  -- Last week
+      AND l.market ILIKE '%tampa%'
+      AND ph.category = 'Perishable'
+    GROUP BY ph.product
+),
+wdd_forecast AS (
+    -- Get WDD percentage from metrics table for next week
+    SELECT m.product,
+        (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+    FROM metrics m
+    JOIN location l ON m.location = l.location
+    WHERE m.end_date = '2025-11-15'  -- Next week
+      AND l.market ILIKE '%tampa%'
+    GROUP BY m.product
+)
+SELECT 
+    lws.product,
+    lws.last_week_units AS last_week_sales,
+    ROUND(COALESCE(w.wdd_pct, 0) * 100, 2) AS wdd_change_pct,
+    ROUND(lws.last_week_units * (1 + COALESCE(w.wdd_pct, 0)), 0) AS recommended_order_qty
+FROM last_week_sales lws
+LEFT JOIN wdd_forecast w ON lws.product = w.product
+ORDER BY wdd_change_pct DESC
 LIMIT 30;
 
 14. WHERE vs HAVING CLAUSE (CRITICAL - PREVENTS ERRORS!):
@@ -1478,6 +1532,168 @@ Use these when user asks about: stockout risk, overstock analysis, inventory tur
    FULL OUTER JOIN overstock_risk o ON s.product = o.product AND s.region = o.region
    ORDER BY predicted_total_loss DESC;
 
+=== NEW CRITICAL FORMULAS (Testing Requirements) ===
+
+**11. Weeks of Cover (WOC)** - Inventory Risk Assessment:
+   Formula: Current_Stock / Average_Weekly_Sales
+   Purpose: Measure how many weeks current inventory will last
+   Risk Levels:
+   - HIGH RISK: < 1 week of cover
+   - MEDIUM RISK: 1 to < 2 weeks of cover
+   - LOW RISK: ≥ 2 weeks of cover
+   
+   PostgreSQL Example:
+   WITH weekly_sales AS (
+     SELECT ph.product, l.location,
+            AVG(week_sales.units) AS avg_weekly_sales
+     FROM (
+       SELECT s.product_code, s.store_code,
+              DATE_TRUNC('week', s.transaction_date) AS week,
+              SUM(s.sales_units) AS units
+       FROM sales s
+       WHERE s.transaction_date BETWEEN '2025-10-12' AND '2025-11-08'  -- Last 4 weeks
+       GROUP BY s.product_code, s.store_code, week
+     ) week_sales
+     JOIN product_hierarchy ph ON week_sales.product_code = ph.product_id
+     JOIN location l ON week_sales.store_code = l.location
+     GROUP BY ph.product, l.location
+   ),
+   current_inventory AS (
+     SELECT ph.product, l.location,
+            SUM(b.stock_at_week_end) AS current_stock
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     WHERE b.week_end_date = '2025-12-27'  -- Current week end
+     GROUP BY ph.product, l.location
+   )
+   SELECT ci.product, ci.location,
+          ci.current_stock,
+          ws.avg_weekly_sales,
+          ROUND(ci.current_stock / NULLIF(ws.avg_weekly_sales, 0), 2) AS weeks_of_cover,
+          CASE 
+            WHEN ci.current_stock / NULLIF(ws.avg_weekly_sales, 0) < 1 THEN 'HIGH RISK'
+            WHEN ci.current_stock / NULLIF(ws.avg_weekly_sales, 0) < 2 THEN 'MEDIUM RISK'
+            ELSE 'LOW RISK'
+          END AS risk_level,
+          CASE 
+            WHEN ci.current_stock / NULLIF(ws.avg_weekly_sales, 0) < 1 THEN 1
+            WHEN ci.current_stock / NULLIF(ws.avg_weekly_sales, 0) < 2 THEN 2
+            ELSE 3
+          END AS risk_priority
+   FROM current_inventory ci
+   JOIN weekly_sales ws ON ci.product = ws.product AND ci.location = ws.location
+   WHERE ci.current_stock > 0
+   ORDER BY weeks_of_cover ASC;
+
+**12. Weekend Filtering for Ideal Beach Weather**:
+   Purpose: Filter for Saturday week_end_date with ideal beach conditions
+   Conditions:
+   - Temperature: 80-95°F (use tmax, tmin from weekly_weather)
+   - Rain: ≤ 0.1 inches (use percin column)
+   - No adverse weather flags: heavy_rain = false, cold_spell = false, snow = false
+   - Day of week: Saturday (week_end_date)
+   
+   PostgreSQL Example:
+   SELECT DISTINCT c.end_date
+   FROM calendar c
+   JOIN weekly_weather ww ON c.end_date = ww.week_end_date
+   WHERE EXTRACT(DOW FROM c.end_date) = 6  -- Saturday = 6
+     AND ww.tmax BETWEEN 80 AND 95
+     AND ww.tmin >= 70  -- Comfortable minimum
+     AND ww.percin <= 0.1
+     AND ww.heavy_rain = false
+     AND ww.cold_spell = false
+     AND ww.snow = false
+     AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'  -- Last 2 years
+   ORDER BY c.end_date;
+
+**13. Quarter-on-Quarter (QoQ) Sales Comparison**:
+   Purpose: Compare sales performance across quarters to identify spikes
+   Formula: ((Current_Quarter_Sales - Previous_Quarter_Sales) / Previous_Quarter_Sales) × 100
+   
+   PostgreSQL Example:
+   WITH quarterly_sales AS (
+     SELECT ph.product, l.market,
+            c.quarter, c.year,
+            SUM(s.sales_units) AS total_units
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     JOIN calendar c ON DATE_TRUNC('week', s.transaction_date)::date = c.end_date
+     WHERE c.end_date BETWEEN '2023-07-01' AND '2025-11-08'  -- Last 8 quarters
+     GROUP BY ph.product, l.market, c.quarter, c.year
+   ),
+   lagged_sales AS (
+     SELECT *,
+            LAG(total_units) OVER (PARTITION BY product, market ORDER BY year, quarter) AS prev_quarter_units
+     FROM quarterly_sales
+   )
+   SELECT product, market, quarter, year, total_units, prev_quarter_units,
+          ROUND(((total_units - prev_quarter_units)::NUMERIC / NULLIF(prev_quarter_units, 0)) * 100, 2) AS qoq_change_pct
+   FROM lagged_sales
+   WHERE prev_quarter_units IS NOT NULL
+   ORDER BY qoq_change_pct DESC;
+
+**14. Event Proximity Checking**:
+   Purpose: Check if events occurred near stores during specific weeks
+   Logic: Find events within same market/state during the week
+   
+   PostgreSQL Example:
+   SELECT DISTINCT c.end_date, l.market, l.state,
+          COUNT(e.event) AS event_count,
+          STRING_AGG(e.event, ', ') AS events_nearby
+   FROM calendar c
+   CROSS JOIN location l
+   LEFT JOIN events e ON l.market = e.market 
+     AND e.event_date BETWEEN c.end_date - INTERVAL '7 days' AND c.end_date
+   WHERE c.end_date IN ('2025-01-11', '2025-01-18', '2025-02-15')  -- Specific weeks
+     AND l.market = 'columbia, sc'
+   GROUP BY c.end_date, l.market, l.state
+   HAVING COUNT(e.event) = 0;  -- Only weeks with NO events
+
+**15. Improved Shelf Life Risk with Daily Sales Velocity**:
+   Purpose: Calculate precise expiry risk using daily selling rate
+   Formula:
+   - Days to Expiry > 0: Shelf_Life_Loss = (Current_Stock - (Daily_Sales_Velocity × Days_To_Expiry)) × Unit_Price
+   - Days to Expiry ≤ 0: Shelf_Life_Loss = Current_Stock × Unit_Price
+   
+   PostgreSQL Example:
+   WITH daily_velocity AS (
+     SELECT ph.product, l.location,
+            SUM(s.sales_units) / 28.0 AS daily_sales_velocity
+     FROM sales s
+     JOIN product_hierarchy ph ON s.product_code = ph.product_id
+     JOIN location l ON s.store_code = l.location
+     WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+     GROUP BY ph.product, l.location
+   ),
+   perishable_stock AS (
+     SELECT ph.product, l.location, b.batch_id,
+            b.stock_at_week_end AS current_stock,
+            p.max_period - EXTRACT(DAY FROM ('2025-11-08'::date - b.received_date)) AS days_to_expiry,
+            (SELECT AVG(total_amount) FROM sales WHERE product_code = b.product_code) AS unit_price
+     FROM batches b
+     JOIN product_hierarchy ph ON b.product_code = ph.product_id
+     JOIN location l ON b.store_code = l.location
+     JOIN perishable p ON ph.product = p.product
+     WHERE b.week_end_date = '2025-11-08'
+   )
+   SELECT ps.product, ps.location,
+          ps.current_stock,
+          dv.daily_sales_velocity,
+          ps.days_to_expiry,
+          CASE 
+            WHEN ps.days_to_expiry > 0 THEN 
+              GREATEST(0, ps.current_stock - (dv.daily_sales_velocity * ps.days_to_expiry)) * ps.unit_price
+            ELSE 
+              ps.current_stock * ps.unit_price
+          END AS shelf_life_loss
+   FROM perishable_stock ps
+   JOIN daily_velocity dv ON ps.product = dv.product AND ps.location = dv.location
+   WHERE ps.days_to_expiry <= 7
+   ORDER BY shelf_life_loss DESC;
+
 === WHEN TO USE CFO FORMULAS ===
 - "stockout risk" / "running out" → Use Formula #4 (Stockout Loss)
 - "inventory optimization" / "overstock" → Use Formula #7 (Overstock %)
@@ -1485,9 +1701,26 @@ Use these when user asks about: stockout risk, overstock analysis, inventory tur
 - "demand forecast" / "order planning" → Use Formula #3 (Adjusted Demand)
 - "week-over-week" / "regional performance" → Use Formula #5 (WoW Change)
 - "demand spike" / "unusual sales" → Use Formula #6 (Sales Uplift)
-- "perishable risk" / "expiring stock" → Use Formula #8 (Shelf-Life Risk)
+- "perishable risk" / "expiring stock" → Use Formula #8 or #15 (Shelf-Life Risk)
 - "SKU availability" / "out of stock rate" → Use Formula #9 (Stockout Rate)
 - "financial loss" / "total risk" → Use Formula #10 (Predicted Total Loss)
+- "weeks of cover" / "inventory duration" / "how long will stock last" → Use Formula #11 (Weeks of Cover)
+- "weekend sales" / "beach weather" → Use Formula #12 (Weekend Filtering)
+- "quarter comparison" / "quarterly growth" → Use Formula #13 (QoQ Comparison)
+- "event proximity" / "no events nearby" → Use Formula #14 (Event Proximity)
+- "prevent waste" / "ordering advice" / "adjust ordering" → MUST USE BOTH:
+  1. Formula #3 (Adjusted Demand) for recommended order quantity
+  2. Formula #15 (Shelf Life Risk) for waste prevention analysis
+  3. Include daily_sales_velocity, current_stock, days_to_expiry, potential_waste_units
+
+CRITICAL FOR Q3-TYPE QUERIES (prevent waste + adjust ordering):
+When query asks about "prevent waste", "adjust ordering", or "ordering advice" for perishables:
+- ALWAYS include shelf life risk calculation (Formula #15)
+- ALWAYS calculate daily sales velocity
+- ALWAYS check current stock levels from batches
+- ALWAYS calculate days to expiry
+- ALWAYS provide potential waste units
+- Answer MUST address BOTH: (1) demand change % AND (2) specific waste prevention advice
 
 Generate the PostgreSQL SELECT query:
 """)
