@@ -579,6 +579,9 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
   * category = Product category (e.g., 'QSR', 'Perishable', 'Beverages') - MIDDLE LEVEL
   * product = Specific product name (e.g., 'Hamburgers', 'Milk', 'Sandwiches') - LOWEST LEVEL
   
+  ⚠️ CRITICAL: "Restaurant Sector" is a special PRODUCT-level entry (no parent hierarchy) for sector-level analysis!
+  "Restaurant Sector" or "Restaurant traffic" → Use ph.product = 'Restaurant Sector' (NOT ph.category = 'QSR'!)
+  
   🔍 HIERARCHICAL FILTERING LOGIC:
   
   Level 1 - DEPARTMENT (Broadest):
@@ -596,6 +599,7 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
     - User mentions specific names: "Hamburgers", "Milk", "Sandwiches"
     - SQL: WHERE ph.product = 'product_name' OR WHERE ph.product IN ('p1', 'p2')
     - Example: "Sandwiches" → WHERE ph.product = 'Sandwiches'
+    - ⚠️ SPECIAL CASE: "Restaurant Sector" → WHERE ph.product = 'Restaurant Sector' (sector-level product, no parent)
   
   🚨 CRITICAL EXAMPLES:
   
@@ -631,6 +635,16 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
        - Bacon, Eggs, Milk
      
      (More perishable products like Ice Cream are in the perishable table but not in product_hierarchy)
+  
+  ✅ CORRECT - "Restaurant traffic this Fall"
+     SELECT ... WHERE ph.product = 'Restaurant Sector' AND c.season = 'Fall'
+     → Returns: ALL restaurant products across ALL categories (QSR, Fast Food, Casual Dining, etc.)
+  
+  ❌ WRONG - "Restaurant traffic this Fall"
+     SELECT ... WHERE ph.category = 'QSR' AND c.season = 'Fall'
+     → WRONG! Only returns QSR category, misses other restaurant categories
+  
+  📊 NOTE: 'Restaurant Sector' is a special product entry added for sector-level analysis (no parent hierarchy)
 
 PERISHABLE TABLE (Extended perishable product details):
 - perishable (id, product, perishable_id, min_period, max_period, period_metric, storage)
@@ -755,6 +769,31 @@ EXAMPLES:
 - "weather-driven risks" → Use metric vs metric_ly (negative values = risk)
 
 SEASONS: Spring=Feb/Mar/Apr, Summer=May/Jun/Jul, Fall=Aug/Sep/Oct, Winter=Nov/Dec/Jan
+
+⚠️ CRITICAL - SEASONAL QUERIES (Q6, Q7, Q8, Q9):
+==================================================
+TEMPORAL MAPPING (Current date: November 8, 2025):
+- "last spring" = Spring 2025 (Feb/Mar/Apr 2025) → HISTORICAL, c.year = 2025, m.end_date <= '2025-11-08'
+- "coming spring" = Spring 2026 (Feb/Mar/Apr 2026) → FUTURE, c.year = 2026, m.end_date >= '2025-11-09'
+- "past summer" = Summer 2025 (May/Jun/Jul 2025) → HISTORICAL, c.year = 2025, m.end_date <= '2025-11-08'
+- "coming winter" = Winter 2025-26 (Nov/Dec 2025 + Jan 2026) → FUTURE/CURRENT, c.year = 2025, m.end_date >= '2025-11-09'
+
+CRITICAL RULES FOR SEASONAL QUERIES:
+1. ❌ NEVER use c.year IN (2024, 2025) - causes double-counting! metric already has this year, metric_ly has last year
+2. ✅ Filter ONE year only (c.year = 2025 for historical OR c.year = 2026 for future spring/summer/fall)
+3. ✅ metric = current year's data, metric_ly = last year's data AUTOMATICALLY in the same row
+4. ✅ Historical: Add m.end_date <= '2025-11-08' filter
+5. ✅ Future: Add m.end_date >= '2025-11-09' filter
+6. ✅ "biggest risks" → ORDER BY wdd_pct DESC (highest first)
+7. ⚠️ NEVER "ORDER BY ABS(alias)" - PostgreSQL error! Use "ORDER BY ABS((full_calculation))" or just "ORDER BY alias DESC"
+8. ❌ NEVER ORDER BY ASC for "biggest risks" - that shows SMALLEST changes!
+9. ✅ Product hierarchy: ph.dept for sectors (e.g., 'Apparel'), ph.category for subcategories, ph.product for items
+10. ✅ Do NOT group by c.month unless explicitly asked - group by season or region only
+
+EXAMPLE CORRECT QUERIES:
+- "Allergy Relief last spring" → c.season = 'Spring' AND c.year = 2025 AND m.end_date <= '2025-11-08'
+- "Boots coming winter risks" → c.season = 'Winter' AND c.year = 2025 AND m.end_date >= '2025-11-09' ORDER BY wdd_pct DESC (NOT ABS(alias)!)
+- "Apparel past summer vs prior summer" → c.season = 'Summer' AND c.year = 2025 AND m.end_date <= '2025-11-08' (metric vs metric_ly shows 2025 vs 2024)
 """)
         
         # SQL generation instructions

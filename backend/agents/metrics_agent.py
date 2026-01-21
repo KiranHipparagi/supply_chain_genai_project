@@ -66,6 +66,8 @@ class MetricsAgent:
         "demand trend", "demand change", "demand uplift",
         "weather impact", "weather effect",
         "recommended order", "ordering volume", "procurement", "reorder",
+        # Restaurant sector queries
+        "restaurant traffic", "restaurant sector", "restaurant performance",
         # Add patterns that indicate WDD analysis
         "below-normal demand", "above-normal demand", "normal demand",
         "higher-than-normal", "lower-than-normal",
@@ -180,6 +182,41 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
                 "PAST queries (>4 weeks, YoY): use metric vs metric_ly"
             ]
         }
+        
+        # CRITICAL: Seasonal Planning Query Guidance (Q6, Q7, Q8, Q9)
+        if any(word in query_lower for word in ["spring", "summer", "fall", "winter", "season", "seasonal"]):
+            hints["seasonal_guidance"] = {
+                "critical_rules": [
+                    "❌ NEVER filter c.year IN (2024, 2025) - causes double-counting!",
+                    "✅ Filter ONE year only (usually current year for historical, next year for future)",
+                    "✅ metric = current year data, metric_ly = last year data AUTOMATICALLY",
+                    "✅ 'last spring' = Spring 2025 (historical), 'coming spring' = Spring 2026 (future)",
+                    "✅ Historical queries: c.year = 2025 AND m.end_date <= '2025-11-08'",
+                    "✅ Future queries: c.year = 2025 (Winter) or 2026 (Spring/Summer/Fall) AND m.end_date >= '2025-11-09'",
+                    "✅ For risks: ORDER BY wdd_pct DESC (NOT ABS(alias) - PostgreSQL error!)",
+                    "✅ If ABS needed: ORDER BY ABS((full_expression)) DESC - repeat calculation, don't use alias",
+                    "❌ Never ORDER BY ASC for 'biggest risks' - that shows smallest!"
+                ],
+                "temporal_mapping": {
+                    "last spring": "c.season = 'Spring' AND c.year = 2025 AND m.end_date <= '2025-11-08'",
+                    "coming spring": "c.season = 'Spring' AND c.year = 2026 AND m.end_date >= '2025-11-09'",
+                    "last summer": "c.season = 'Summer' AND c.year = 2025 AND m.end_date <= '2025-11-08'",
+                    "coming winter": "c.season = 'Winter' AND c.year = 2025 AND m.end_date >= '2025-11-09'",
+                    "past summer": "c.season = 'Summer' AND c.year = 2025 AND m.end_date <= '2025-11-08'",
+                    "prior summer": "Use metric vs metric_ly, filter c.year = 2025"
+                },
+                "product_hierarchy_note": "Use ph.dept for 'Apparel sector', ph.category for subcategories, ph.product for items",
+                "grouping_note": "Do NOT group by c.month unless explicitly asked - group by season or region"
+            }
+        
+        # CRITICAL: Restaurant Sector Queries (Q10)
+        if any(word in query_lower for word in ["restaurant", "qsr"]):
+            hints["restaurant_guidance"] = {
+                "sector_filter": "ph.product = 'Restaurant Sector' (NOT ph.category = 'QSR'!)",
+                "critical_note": "'Restaurant Sector' is a special PRODUCT-level entry for sector analysis (no parent hierarchy)",
+                "categories_within": ["QSR", "Fast Food", "Casual Dining"],
+                "example": "WHERE ph.product = 'Restaurant Sector' captures ALL restaurant categories"
+            }
         
         # Add WDD formula based on time context
         if time_context["comparison_type"] == "future":
