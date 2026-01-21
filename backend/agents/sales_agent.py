@@ -35,7 +35,10 @@ class SalesAgent:
         "sales performance", "sales trend", "sales change",
         "discount", "total amount", "gross sales",
         "how did", "perform", "performance", "transaction",
-        "week-on-week", "wow", "sales uplift", "sales velocity"
+        "week-on-week", "wow", "sales uplift", "sales velocity",
+        "rise in sales", "sales increase", "sales growth",
+        "without weather", "no weather", "no event", "anomaly", "unexplained",
+        "quarter-on-quarter", "qoq", "quarterly"
     ]
     
     # Keywords that should NOT go to sales agent (WDD is different)
@@ -176,6 +179,21 @@ JOIN previous_week prev ON curr.{dimension} = prev.{dimension}
         
         if any(word in query_lower for word in ["bottom", "lowest", "worst"]):
             hints["aggregation_hints"].append("ORDER BY revenue ASC LIMIT 10")
+        
+        # Q2-type queries: Sales anomaly without weather/event
+        if any(word in query_lower for word in ["rise in sales", "sales increase", "without weather", "no weather", "no event", "anomaly"]):
+            hints["anomaly_detection_guidance"] = {
+                "critical_table": "SALES table (NOT metrics!) - need actual sales_units, revenue, transactions",
+                "comparison_method": "Quarter-on-Quarter (QoQ) using LAG window function over 8 quarters",
+                "weather_filter": "ALL flags = false (heatwave_flag, cold_spell_flag, heavy_rain_flag, snow_flag)",
+                "event_filter": "LEFT JOIN events + HAVING COUNT(event) = 0",
+                "output_format": [
+                    "Show: product, qoq_pct, prev_units → curr_units, prev_quarter → curr_quarter",
+                    "Quarter labels: Q1-25, Q2-25, Q3-23, Q4-24 format",
+                    "Include both sales_units AND total_revenue (total_amount)"
+                ],
+                "example": "Sandwiches: +268% (9,957 → 14,571 units, Q4-24 → Q1-25)"
+            }
         
         logger.info(f"📊 SalesAgent provided {len(hints['formulas'])} formula hints")
         return hints

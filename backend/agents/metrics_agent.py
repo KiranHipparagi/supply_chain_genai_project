@@ -85,6 +85,12 @@ class MetricsAgent:
         "demand_words": ["demand", "forecast", "expect", "impact", "uplift", "trend", "order", "ordering", "normal", "performance"]
     }
     
+    # Beach weather food diversification keywords
+    BEACH_WEATHER_KEYWORDS = [
+        "beach weather", "ideal beach", "peak weekend", "weekend sales",
+        "diversify", "diversification", "food options", "miami beach"
+    ]
+    
     # Exclude actual sales queries
     EXCLUDE_KEYWORDS = [
         "revenue only", "sold units only", "sales amount only",
@@ -216,6 +222,121 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
                 "critical_note": "'Restaurant Sector' is a special PRODUCT-level entry for sector analysis (no parent hierarchy)",
                 "categories_within": ["QSR", "Fast Food", "Casual Dining"],
                 "example": "WHERE ph.product = 'Restaurant Sector' captures ALL restaurant categories"
+            }
+            
+        # IMPORTANT: NULL Category/Dept Handling for Sector-Level Products
+        hints["null_category_handling"] = {
+            "description": "Some products have NULL category or dept - these are sector-level or general products",
+            "examples": [
+                "Restaurant Sector (NULL category/dept)",
+                "Grocery Sector (NULL category/dept)",
+                "Home Improvement Sect. (NULL category/dept)",
+                "Total Fleece, Total Shorts, Total Boots (NULL category)"
+            ],
+            "sql_pattern": "Use COALESCE(ph.category, 'General') AS category in SELECT",
+            "grouping": "Include ph.category and ph.dept in GROUP BY even if NULL",
+            "explanation": "NULL values indicate sector-level or aggregate products without detailed hierarchy - this is VALID, do not filter them out"
+        }
+        
+        # CRITICAL: Beach Weather Food Diversification Queries (Q1)
+        if any(word in query_lower for word in ["beach weather", "ideal beach", "diversify", "diversification", "peak weekend"]):
+            hints["beach_weather_guidance"] = {
+                "critical_table": "MUST use metrics table (NOT sales table!) for WDD vs LY calculation",
+                "formula": "(SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100 AS wdd_vs_ly_pct",
+                "date_range": "Use 2 years historical: c.end_date BETWEEN '2023-11-08' AND '2025-11-08'",
+                "weather_filters": [
+                    "EXTRACT(DOW FROM c.end_date) = 6  -- Saturday weekends",
+                    "w.tmax_f BETWEEN 80 AND 95  -- Ideal temperature (Fahrenheit)",
+                    "w.tmin_f >= 70  -- Comfortable minimum",
+                    "w.precip_in <= 0.1  -- Minimal rain (inches)",
+                    "w.heatwave_flag = false AND w.cold_spell_flag = false",
+                    "w.heavy_rain_flag = false AND w.snow_flag = false"
+                ],
+                "join_pattern": "FROM metrics m JOIN product_hierarchy ph ON m.product = ph.product",
+                "example_query": """SELECT ph.product, ph.category,
+       ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN location l ON m.location = l.location  
+JOIN calendar c ON m.end_date = c.end_date
+JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+WHERE l.market ILIKE '%miami%'
+  AND EXTRACT(DOW FROM c.end_date) = 6
+  AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'
+  AND w.tmax_f BETWEEN 80 AND 95 AND w.tmin_f >= 70
+  AND w.precip_in <= 0.1
+  AND w.heatwave_flag = false AND w.cold_spell_flag = false
+  AND w.heavy_rain_flag = false AND w.snow_flag = false
+GROUP BY ph.product, ph.category
+ORDER BY wdd_vs_ly_pct DESC"""
+            }
+        
+        # CRITICAL: Weather Impact + Stockout Risk Queries (Q12)
+        if any(word in query_lower for word in ["stockout", "stock out", "replenishment", "avoid stockout", "prevent stockout"]):
+            hints["stockout_risk_guidance"] = {
+                "critical_tables": "MUST use THREE tables: metrics (WDD), sales (avg weekly sales), batches (current stock)",
+                "formulas": [
+                    "WDD Forecast: (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100",
+                    "Avg Weekly Sales: AVG(s.sales_units) over last 4 weeks",
+                    "Weeks of Cover (WOC): current_stock / avg_weekly_sales",
+                    "Risk Level: CASE WHEN woc < 1 THEN 'HIGH RISK' WHEN woc < 2 THEN 'MEDIUM RISK' ELSE 'LOW RISK' END",
+                    "Risk Priority: CASE WHEN woc < 1 THEN 1 WHEN woc < 2 THEN 2 ELSE 3 END"
+                ],
+                "critical_dates": [
+                    "Next 1-2 weeks: '2025-11-15', '2025-11-22' (for WDD forecast)",
+                    "Last 4 weeks: '2025-10-12' to '2025-11-08' (for avg weekly sales)",
+                    "Current week: '2025-11-08' (for current stock from batches)"
+                ],
+                "output_requirements": [
+                    "Product name",
+                    "WDD uplift % (forecast)",
+                    "Current stock (from batches.closing_stock)",
+                    "Average weekly sales (last 4 weeks)",
+                    "Weeks of cover (WOC)",
+                    "Risk level (HIGH/MEDIUM/LOW)",
+                    "Risk priority (1/2/3 for sorting)"
+                ],
+                "filter_rule": "WHERE current_stock > 0",
+                "sort_rule": "ORDER BY risk_priority ASC, wdd_uplift_pct DESC",
+                "business_context": "Identify products with high demand forecast but low inventory to prevent stockouts"
+            }
+        
+        # CRITICAL: Perishable Products + WDD + Availability Risk (Q13 - Tampa)
+        if any(word in query_lower for word in ["perishable", "strongest wdd", "strongest weather", "low availability", "tampa"]) and \
+           any(word in query_lower for word in ["6 weeks", "six weeks", "past 6", "last 6"]):
+            hints["tampa_perishable_risk_guidance"] = {
+                "critical_tables": "MUST use FOUR tables: metrics (WDD vs LY), sales (avg sales), batches (current stock), perishable (filter)",
+                "formulas": [
+                    "WDD vs LY: (SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100",
+                    "Avg Weekly Sales: AVG(s.sales_units) over 11-15 to 12-27",
+                    "Weeks of Cover (WOC): current_stock / avg_weekly_sales",
+                    "Risk Level: CASE WHEN woc < 1 THEN 'HIGH RISK' WHEN woc < 2 THEN 'MEDIUM RISK' ELSE 'LOW RISK' END",
+                    "Risk Priority: CASE WHEN woc < 1 THEN 1 WHEN woc < 2 THEN 2 ELSE 3 END"
+                ],
+                "critical_dates": [
+                    "Last 6-7 weeks: ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')",
+                    "Avg sales period: '2025-09-27' to '2025-11-08'",
+                    "Current inventory: '2025-11-08' (from batches.stock_at_week_end) - DEMO DATA CURRENT DATE"
+                ],
+                "perishable_filter": "WHERE ph.category = 'Perishable' (in ALL CTEs)",
+                "market_filter": "WHERE l.market = 'tampa, fl' (in ALL CTEs)",
+                "weather_flags": "Include heatwave_flag and cold_spell_flag from weekly_weather",
+                "output_requirements": [
+                    "Product name",
+                    "Category (should be 'Perishable')",
+                    "WDD vs LY % (last 6 weeks)",
+                    "Weeks analyzed (should be ≤6)",
+                    "Heatwave present (Yes/No)",
+                    "Cold spell present (Yes/No)",
+                    "Current stock (at 12-27-2025)",
+                    "Average weekly sales",
+                    "Weeks of cover (WOC)",
+                    "Availability risk (HIGH/MEDIUM/LOW)",
+                    "Risk priority (1/2/3)"
+                ],
+                "filter_rule": "WHERE cs.current_stock > 0 AND aws.avg_weekly_sales > 0",
+                "sort_rule": "ORDER BY risk_priority ASC, wdd_vs_ly_pct DESC",
+                "business_context": "Identify perishable products with strong weather-driven demand in Tampa that may face stockout risk"
             }
         
         # Add WDD formula based on time context

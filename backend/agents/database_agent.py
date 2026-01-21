@@ -230,6 +230,9 @@ The detailed schema, examples, and domain hints are provided in the user prompt 
         
         # Build domain hints section
         hints_section = "\n\n=== DOMAIN EXPERT HINTS ===\n"
+        hints_section += "\n⚠️ CRITICAL JOIN ORDER: Always define tables BEFORE referencing them!\n"
+        hints_section += "Example: FROM sales s JOIN product_hierarchy ph ... JOIN metrics m ON m.product = ph.product\n"
+        hints_section += "(Define ph before using ph.product in JOIN conditions)\n\n"
         
         for hint in domain_hints:
             agent_name = hint.get("agent", "unknown").upper()

@@ -37,7 +37,9 @@ class InventoryAgent:
         "overstock", "stockout", "out of stock",
         "received", "transfer", "movement", "tracking",
         "current stock", "stock level", "stock at",
-        "shrinkage", "shrink", "risk of shrinkage"  # Added for Q4-type queries
+        "shrinkage", "shrink", "risk of shrinkage",  # Added for Q4-type queries
+        "replenishment", "replenish", "avoid stockout", "prevent stockout",  # Added for Q12-type queries
+        "weeks of cover", "woc", "inventory risk"  # Added for Q12-type queries
     ]
     
     def __init__(self):
@@ -187,6 +189,130 @@ AS shelf_life_risk_value
                 "name": "Total Spoilage",
                 "sql": "SUM(sr.spoilage_qty) AS total_spoiled, AVG(sr.spoilage_pct) AS avg_spoilage_pct",
                 "description": "Spoilage quantity and percentage"
+            })
+        
+        # STOCKOUT RISK / WEEKS OF COVER - Q12 Type Query
+        if any(word in query_lower for word in ["stockout", "replenishment", "avoid stockout", "prevent stockout", "weeks of cover", "woc"]):
+            hints["formulas"].append({
+                "name": "Weeks of Cover (WOC) + Stockout Risk",
+                "sql": """
+-- CRITICAL: For stockout risk and replenishment needs:
+-- Formula: current_stock / avg_weekly_sales
+-- Risk Levels: HIGH < 1 week, MEDIUM 1-2 weeks, LOW >= 2 weeks
+
+WITH avg_weekly_sales AS (
+    SELECT ph.product,
+           AVG(s.sales_units) AS avg_weekly_sales
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    WHERE s.transaction_date BETWEEN '2025-10-12' AND '2025-11-08'  -- Last 4 weeks
+    GROUP BY ph.product
+),
+current_stock AS (
+    SELECT ph.product,
+           SUM(b.stock_at_week_end) AS current_stock
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    WHERE b.week_end_date = '2025-11-08'  -- Current week
+    GROUP BY ph.product
+)
+SELECT 
+    cs.product,
+    cs.current_stock,
+    aws.avg_weekly_sales,
+    ROUND(cs.current_stock / NULLIF(aws.avg_weekly_sales, 0), 2) AS weeks_of_cover,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 'HIGH RISK'
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 'MEDIUM RISK'
+        ELSE 'LOW RISK'
+    END AS risk_level,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 1
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 2
+        ELSE 3
+    END AS risk_priority
+FROM current_stock cs
+JOIN avg_weekly_sales aws ON cs.product = aws.product
+WHERE cs.current_stock > 0
+ORDER BY risk_priority ASC;
+""",
+                "description": "Calculate weeks of cover and categorize stockout risk (Q12)",
+                "critical_dates": {
+                    "avg_sales_period": "Last 4 weeks: 2025-10-12 to 2025-11-08",
+                    "current_stock_date": "2025-11-08"
+                },
+                "output_fields": ["product", "current_stock", "avg_weekly_sales", "weeks_of_cover", "risk_level", "risk_priority"],
+                "when_to_use": "For queries asking about replenishment needs, stockout prevention, or inventory adequacy"
+            })
+        
+        # Q13: Tampa Perishable WDD + Availability Risk (6 weeks)
+        if any(word in query_lower for word in ["tampa", "perishable", "strongest wdd", "low availability", "availability risk"]) and \
+           any(word in query_lower for word in ["6 weeks", "six weeks", "past 6", "last 6"]):
+            hints["formulas"].append({
+                "name": "Perishable WDD + Availability Risk (Tampa 6-Week)",
+                "sql": """
+-- Q13: Perishable products with strong WDD + availability risk in Tampa
+WITH wdd_trends AS (
+    SELECT ph.product, ph.category,
+           ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct,
+           COUNT(DISTINCT m.end_date) AS weeks_analyzed,
+           MAX(CASE WHEN w.heatwave_flag = true THEN 1 ELSE 0 END) AS had_heatwave,
+           MAX(CASE WHEN w.cold_spell_flag = true THEN 1 ELSE 0 END) AS had_cold_spell
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    JOIN calendar c ON m.end_date = c.end_date
+    LEFT JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+    WHERE ph.category = 'Perishable'
+      AND l.market = 'tampa, fl'
+      AND c.end_date IN ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')
+    GROUP BY ph.product, ph.category
+    HAVING SUM(m.metric_ly) > 0
+),
+avg_weekly_sales AS (
+    SELECT ph.product, AVG(s.sales_units) AS avg_weekly_sales
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE ph.category = 'Perishable'
+      AND l.market = 'tampa, fl'
+      AND s.transaction_date BETWEEN '2025-09-27' AND '2025-11-08'
+    GROUP BY ph.product
+),
+current_stock AS (
+    SELECT ph.product, SUM(b.stock_at_week_end) AS current_stock
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    JOIN location l ON b.store_code = l.location
+    WHERE ph.category = 'Perishable'
+      AND l.market = 'tampa, fl'
+      AND b.week_end_date = '2025-11-08'
+    GROUP BY ph.product
+)
+SELECT wt.product, wt.wdd_vs_ly_pct, wt.weeks_analyzed,
+       CASE WHEN wt.had_heatwave = 1 THEN 'Yes' ELSE 'No' END AS heatwave_present,
+       cs.current_stock, aws.avg_weekly_sales,
+       ROUND(cs.current_stock / NULLIF(aws.avg_weekly_sales, 0), 2) AS weeks_of_cover,
+       CASE WHEN woc < 1 THEN 'HIGH RISK' WHEN woc < 2 THEN 'MEDIUM RISK' ELSE 'LOW RISK' END AS availability_risk,
+       CASE WHEN woc < 1 THEN 1 WHEN woc < 2 THEN 2 ELSE 3 END AS risk_priority
+FROM wdd_trends wt
+LEFT JOIN current_stock cs ON wt.product = cs.product
+LEFT JOIN avg_weekly_sales aws ON wt.product = aws.product
+WHERE cs.current_stock > 0 AND aws.avg_weekly_sales > 0
+ORDER BY risk_priority ASC, wt.wdd_vs_ly_pct DESC;
+""",
+                "description": "Q13: Tampa perishable products with strong WDD and availability risk assessment",
+                "critical_dates": {
+                    "last_6_weeks": "2025-09-27, 10-04, 10-11, 10-18, 10-25, 11-01, 11-08 (CORRECTED)",
+                    "avg_sales_period": "2025-09-27 to 2025-11-08",
+                    "current_stock_date": "2025-11-08 (DEMO DATA CURRENT DATE)"
+                },
+                "filters": {
+                    "perishable": "ph.category = 'Perishable' (in ALL CTEs)",
+                    "market": "l.market = 'tampa, fl' (in ALL CTEs)"
+                },
+                "output_fields": ["product", "wdd_vs_ly_pct", "weeks_analyzed", "heatwave_present", "current_stock", "avg_weekly_sales", "weeks_of_cover", "availability_risk", "risk_priority"],
+                "when_to_use": "For Tampa perishable WDD analysis with availability risk (6-week period)"
             })
         
         # SHRINKAGE RISK - Q4 Type Query (heatwave + perishable + shrinkage)

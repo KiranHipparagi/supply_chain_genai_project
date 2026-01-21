@@ -568,6 +568,44 @@ WEEKLY_WEATHER TABLE:
 LOCATION TABLE:
 - location (id, location, region, market, state, latitude, longitude)
   * location = Store ID (PRIMARY KEY, e.g., 'ST6111')
+
+⚠️ CRITICAL: SQL JOIN ORDERING RULES (Prevents "missing FROM-clause entry" errors)
+
+1. **ALWAYS define tables BEFORE referencing them in JOIN conditions**
+   ❌ WRONG:
+   FROM sales s
+   JOIN metrics m ON m.product = ph.product  -- ERROR! ph not defined yet
+   JOIN product_hierarchy ph ON s.product_code = ph.product_id
+   
+   ✅ CORRECT:
+   FROM sales s
+   JOIN product_hierarchy ph ON s.product_code = ph.product_id  -- Define ph first
+   JOIN metrics m ON m.product = ph.product  -- Now we can use ph
+
+2. **Recommended JOIN order** (define lookup/dimension tables before fact tables):
+   a) Start with main fact table (sales, metrics, batches, etc.)
+   b) Join dimension tables next (product_hierarchy, location, calendar)
+   c) Join secondary fact tables that reference dimensions (metrics, weather)
+   d) Join aggregation/CTE tables last
+
+3. **Example - Correct JOIN order for multi-table queries**:
+   ```sql
+   FROM sales s
+   JOIN product_hierarchy ph ON s.product_code = ph.product_id
+   JOIN location l ON s.store_code = l.location
+   JOIN calendar c ON s.transaction_date = c.end_date
+   JOIN metrics m ON m.product = ph.product 
+                  AND m.location = l.location 
+                  AND m.end_date = c.end_date
+   LEFT JOIN sales s_ly ON s_ly.product_code = s.product_code 
+                        AND s_ly.store_code = s.store_code 
+                        AND s_ly.transaction_date = c.end_date - INTERVAL '1 year'
+   ```
+
+4. **Common error pattern to avoid**:
+   - Referencing table alias before it's joined
+   - Using columns from tables that appear later in the FROM clause
+   - Solution: Reorder JOINs so all referenced tables are defined first
   * region = LOWERCASE: 'northeast', 'southeast', 'midwest', 'west', 'southwest'
   * market = Market area (e.g., 'chicago, il', 'dallas, tx')
   * state = State name lowercase (e.g., 'illinois', 'texas')
@@ -645,6 +683,15 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
      → WRONG! Only returns QSR category, misses other restaurant categories
   
   📊 NOTE: 'Restaurant Sector' is a special product entry added for sector-level analysis (no parent hierarchy)
+
+⚠️ IMPORTANT: NULL Category/Dept Handling (Sector-Level Products)
+  Some products have NULL category or dept values - these are VALID sector-level or aggregate products:
+  - Examples: 'Restaurant Sector', 'Grocery Sector', 'Home Improvement Sect.', 'Total Fleece', 'Total Shorts', 'Total Boots'
+  - These represent sector-level aggregates without detailed hierarchy
+  - When selecting category/dept in results: Use COALESCE(ph.category, 'General') AS category
+  - Always include in GROUP BY: GROUP BY ph.product, ph.category, ph.dept (even if NULL)
+  - DO NOT filter out NULL values - they are valid and indicate general/sector-level products
+  - In explanations, clarify that NULL category means "sector-level or general product"
 
 PERISHABLE TABLE (Extended perishable product details):
 - perishable (id, product, perishable_id, min_period, max_period, period_metric, storage)
@@ -1068,53 +1115,387 @@ LIMIT 30;
 -- Recommended Qty = Last-week ACTUAL sales × (1 + WDD %)
 -- Get last-week sales from sales table, NOT from metrics!
 
-**"Rise in Sales Without Weather/Event" Queries (Anomaly Detection):**
+**"Rise in Sales Without Weather/Event" Queries (Anomaly Detection - Q2):**
 Q: "Alert me to products in Columbia, SC that experienced a rise in sales but no weather or event recorded"
-→ Strategy:
-   1. Compare current period sales to previous period (week-over-week)
-   2. LEFT JOIN to weekly_weather and filter for NORMAL conditions (flags = false, NOT NULL!)
-   3. LEFT JOIN to events and check for NULL (no events)
-   4. Calculate sales growth percentage
+
+⚠️ CRITICAL REQUIREMENTS:
+   1. **Use SALES table** (NOT metrics) - Need actual sales_units, revenue, transaction data
+   2. **Quarter-on-Quarter (QoQ) comparison** - Last 8 quarters using LAG window function
+   3. **Calculate quarterly totals FIRST** - Don't filter during aggregation
+   4. **Check weather/events SEPARATELY** - Use separate CTEs to identify quarters with weather/events
+   5. **Filter at the end** - Show only increases where had_weather = false AND had_event = false
+   6. **Date range**: '2023-11-08' to '2025-11-08' (8 quarters = 2 years)
+   7. **Output format**: product, qoq_pct, prev_units → curr_units, prev_quarter → curr_quarter, revenue
    
-⚠️ CRITICAL - Weather Flag Logic:
-   - heatwave_flag = false → Normal weather (NO heatwave) ✓ CORRECT
-   - heatwave_flag IS NULL → No weather data exists ✗ WRONG
-   - Same applies to: heavy_rain_flag, cold_spell_flag, snow_flag
+⚠️ CRITICAL FIXES:
+   - Revenue: Use `SUM(s.sales_units * s.total_amount)` - This is the CORRECT formula!
+   - Calendar join: `s.transaction_date = c.end_date` (sales.transaction_date is already week-ending)
+   - Events join: Use `e.store_id = l.location` (events table has store_id, location table has location)
+   - Location table: Uses column name `location` (not `store_code` for FK reference)
+   - Don't filter weather/events during quarterly aggregation - check separately then filter results
    
-Example SQL:
-WITH current_sales AS (
-    SELECT ph.product, SUM(s.sales_units) AS current_units
+⚠️ CRITICAL - Weather/Event Check Logic:
+   - Create separate CTEs to check if quarters had weather flags or events
+   - Use BOOL_OR to check if ANY week in the quarter had adverse weather
+   - LEFT JOIN these checks to quarterly_sales
+   - Filter final results where both had_weather = false AND had_event = false
+   
+⚠️ BUSINESS CONTEXT:
+   - **Goal**: Find unexplained sales anomalies (increases without external triggers)
+   - **Why**: Identifies opportunities, competitive wins, or demographic shifts needing investigation
+   - **8 quarters**: Provides enough history to see meaningful QoQ trends
+   
+CORRECT QUERY TEMPLATE (Q2):
+```sql
+WITH quarterly_sales AS (
+    SELECT ph.product,
+           c.quarter, c.year,
+           SUM(s.sales_units) AS total_units,
+           SUM(s.sales_units * s.total_amount) AS total_revenue,  -- Correct revenue formula!
+           'Q' || c.quarter || '-' || SUBSTRING(c.year::TEXT, 3, 2) AS quarter_label
     FROM sales s
     JOIN product_hierarchy ph ON s.product_code = ph.product_id
-    JOIN location l ON s.store_code = l.location
-    LEFT JOIN weekly_weather w ON w.week_end_date = s.transaction_date AND w.store_id = l.location
-    LEFT JOIN events e ON e.event_date = s.transaction_date AND e.store_id = l.location
+    JOIN location l ON s.store_code = l.location  -- location table uses 'location' column
+    JOIN calendar c ON s.transaction_date = c.end_date  -- Direct join on transaction_date
     WHERE l.market ILIKE '%columbia, sc%'
-      AND s.transaction_date BETWEEN '2025-10-01' AND '2025-11-08'
-      AND (w.heatwave_flag = false OR w.heatwave_flag IS NULL)  -- No heatwave OR no weather data
-      AND (w.heavy_rain_flag = false OR w.heavy_rain_flag IS NULL)  -- No heavy rain OR no weather data
-      AND (w.cold_spell_flag = false OR w.cold_spell_flag IS NULL)  -- No cold spell OR no weather data
-      AND e.event IS NULL  -- No events recorded
-    GROUP BY ph.product
+      AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'  -- Last 8 quarters (2 years)
+    GROUP BY ph.product, c.quarter, c.year
 ),
-previous_sales AS (
-    SELECT ph.product, SUM(s.sales_units) AS previous_units
+weather_check AS (
+    -- Check which quarters had adverse weather
+    SELECT c.quarter, c.year,
+           BOOL_OR(ww.heatwave_flag OR ww.cold_spell_flag OR ww.heavy_rain_flag OR ww.snow_flag) AS had_weather
+    FROM calendar c
+    JOIN weekly_weather ww ON ww.week_end_date = c.end_date
+    JOIN location l ON ww.store_id = l.location
+    WHERE l.market ILIKE '%columbia, sc%'
+      AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'
+    GROUP BY c.quarter, c.year
+),
+event_check AS (
+    -- Check which quarters had events (events table has store_id)
+    SELECT c.quarter, c.year,
+           COUNT(e.event) > 0 AS had_event
+    FROM calendar c
+    CROSS JOIN location l
+    LEFT JOIN events e ON e.store_id = l.location  -- events.store_id joins to location.location
+                       AND e.event_date BETWEEN c.end_date - INTERVAL '7 days' AND c.end_date
+    WHERE l.market ILIKE '%columbia, sc%'
+      AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'
+    GROUP BY c.quarter, c.year
+),
+lagged_sales AS (
+    SELECT qs.*,
+           LAG(qs.total_units) OVER (PARTITION BY qs.product ORDER BY qs.year, qs.quarter) AS prev_quarter_units,
+           LAG(qs.quarter_label) OVER (PARTITION BY qs.product ORDER BY qs.year, qs.quarter) AS prev_quarter_label,
+           COALESCE(wc.had_weather, false) AS had_weather,
+           COALESCE(ec.had_event, false) AS had_event
+    FROM quarterly_sales qs
+    LEFT JOIN weather_check wc ON qs.quarter = wc.quarter AND qs.year = wc.year
+    LEFT JOIN event_check ec ON qs.quarter = ec.quarter AND qs.year = ec.year
+)
+SELECT product,
+       ROUND(((total_units - prev_quarter_units)::NUMERIC / NULLIF(prev_quarter_units, 0)) * 100, 2) AS qoq_pct,
+       prev_quarter_units,
+       total_units AS curr_quarter_units,
+       total_revenue,
+       prev_quarter_label,
+       quarter_label AS curr_quarter_label
+FROM lagged_sales
+WHERE prev_quarter_units IS NOT NULL
+  AND total_units > prev_quarter_units  -- Only increases
+  AND had_weather = false  -- No adverse weather
+  AND had_event = false    -- No events
+ORDER BY qoq_pct DESC
+LIMIT 30;
+```
+
+**Q2 Context - Unexplained Sales Anomalies**:
+- **Goal**: Find products with sales increases that happened WITHOUT external factors
+- **Time Period**: Last 8 quarters (2 years) from 2023-11-08 to 2025-11-08
+- **"Unexplained" means**: No heatwave, cold spell, heavy rain, snow flags AND no events nearby
+- **Output**: Product name, QoQ %, prev → current units, prev → current quarter, revenue
+- **Business Value**: Identify opportunities or issues requiring investigation
+
+**"Weather Impact + Stockout Risk" Queries (Short-term Forecast + Inventory Risk - Q12):**
+Q: "How could expected weather impact product demand in next 1-2 weeks, and which items need replenishment to avoid stockouts?"
+
+⚠️ CRITICAL - AVOID RESTRICTIVE FILTERS:
+   This query MUST NOT include product or location filters in WHERE clauses!
+   The goal is to find ALL products at risk across ALL stores.
+   Entity resolution provides context but should NOT become WHERE clause filters.
+   
+⚠️ CRITICAL REQUIREMENTS:
+   1. **Use BOTH metrics table (WDD forecast) AND batches table (current stock)**
+   2. **WDD vs Normal** - Short-term forecast for next 1-2 weeks (metric vs metric_nrm)
+   3. **Next weeks dates**: From current 2025-11-08 → Next weeks are 2025-11-15, 2025-11-22
+   4. **Average weekly sales**: Last 4 weeks (2025-10-12 to 2025-11-08) from sales table
+   5. **Current stock**: stock_at_week_end from batches table for current week (2025-11-08)
+   6. **Weeks of Cover (WOC)** = current_stock / avg_weekly_sales
+   7. **Risk levels**: HIGH < 1 week, MEDIUM 1-2 weeks, LOW ≥ 2 weeks
+   8. **Output**: Product, WDD uplift %, current stock, avg weekly sales, WOC, risk level, risk priority
+   9. **Filter**: Only products with current_stock > 0, ordered by risk priority (1=High, 2=Medium, 3=Low)
+   10. **DO NOT add product filters (ph.product IN ...)** - Let query find all products with data
+   11. **DO NOT add location filters (l.location IN ...)** - Aggregate across all stores
+   12. **Group by product only** - Not by market or location (too granular)
+
+⚠️ CRITICAL FORMULAS:
+   - **WDD Forecast**: `ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2)`
+   - **Avg Weekly Sales**: `AVG(s.sales_units)` across last 4 weeks (2025-10-12 to 2025-11-08)
+   - **Weeks of Cover**: `current_stock / NULLIF(avg_weekly_sales, 0)`
+   - **Risk Level**: 
+     * CASE WHEN woc < 1 THEN 'HIGH RISK'
+            WHEN woc < 2 THEN 'MEDIUM RISK'
+            ELSE 'LOW RISK' END
+   - **Risk Priority**: 
+     * CASE WHEN woc < 1 THEN 1
+            WHEN woc < 2 THEN 2
+            ELSE 3 END
+
+⚠️ CRITICAL - DO NOT ADD PRODUCT OR LOCATION FILTERS:
+   - ❌ DO NOT use: WHERE ph.product IN (...)
+   - ❌ DO NOT use: WHERE l.location IN (...)
+   - ❌ DO NOT use: WHERE s.store_code IN (...)
+   - ❌ DO NOT use: WHERE b.store_code IN (...)
+   - ✅ CORRECT: Let the query find ALL products with available data
+   - ✅ CORRECT: Aggregate across ALL stores for product-level view
+   - **Reason**: Product/location filters cause 0 rows - data exists but filters are too restrictive
+
+⚠️ CRITICAL - NULL Category Handling:
+   - Some products have NULL category/dept (sector-level products like 'Restaurant Sector', 'Total Fleece')
+   - Use COALESCE(ph.category, 'General') to show 'General' instead of NULL
+   - This is NORMAL for sector-level aggregate products
+
+CORRECT QUERY TEMPLATE (Q12):
+```sql
+WITH wdd_forecast AS (
+    -- Step 1: WDD forecast for next 1-2 weeks
+    SELECT 
+        ph.product,
+        ph.category,
+        ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_uplift_pct,
+        COUNT(DISTINCT l.market) AS markets_affected
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    JOIN calendar c ON m.end_date = c.end_date
+    WHERE c.end_date IN ('2025-11-15', '2025-11-22')  -- Next 1-2 weeks
+    GROUP BY ph.product, ph.category
+    HAVING SUM(m.metric_nrm) > 0  -- Ensure valid baseline
+),
+avg_weekly_sales AS (
+    -- Step 2: Average weekly sales for last 4 weeks
+    SELECT 
+        ph.product,
+        AVG(s.sales_units) AS avg_weekly_sales,
+        SUM(s.sales_units) AS total_sales_4wks
     FROM sales s
     JOIN product_hierarchy ph ON s.product_code = ph.product_id
-    JOIN location l ON s.store_code = l.location
-    WHERE l.market ILIKE '%columbia, sc%'
-      AND s.transaction_date BETWEEN '2025-09-01' AND '2025-09-30'
+    JOIN calendar c ON s.transaction_date = c.end_date
+    WHERE c.end_date BETWEEN '2025-10-12' AND '2025-11-08'  -- Last 4 weeks
+    GROUP BY ph.product
+    HAVING SUM(s.sales_units) > 0  -- Only products with sales
+),
+current_stock AS (
+    -- Step 3: Current stock as of 2025-11-08
+    SELECT 
+        ph.product,
+        SUM(b.stock_at_week_end) AS current_stock
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    WHERE b.week_end_date = '2025-11-08'
+      AND b.stock_at_week_end > 0  -- Only products with inventory
     GROUP BY ph.product
 )
-SELECT cs.product,
-       cs.current_units,
-       ps.previous_units,
-       ROUND((cs.current_units - ps.previous_units)::NUMERIC / NULLIF(ps.previous_units, 0) * 100, 2) AS growth_pct
-FROM current_sales cs
-JOIN previous_sales ps ON cs.product = ps.product
-WHERE cs.current_units > ps.previous_units
-ORDER BY growth_pct DESC
+-- Final: Combine with LEFT JOINs to show partial data
+SELECT 
+    COALESCE(wf.product, aws.product, cs.product) AS product,
+    COALESCE(wf.category, 'General') AS category,  -- Handle NULL categories
+    wf.wdd_uplift_pct,
+    wf.markets_affected,
+    cs.current_stock,
+    aws.avg_weekly_sales,
+    ROUND(cs.current_stock / NULLIF(aws.avg_weekly_sales, 0), 2) AS weeks_of_cover,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 'HIGH RISK'
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 'MEDIUM RISK'
+        ELSE 'LOW RISK'
+    END AS risk_level,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 1
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 2
+        ELSE 3
+    END AS risk_priority
+FROM wdd_forecast wf
+LEFT JOIN current_stock cs ON wf.product = cs.product
+LEFT JOIN avg_weekly_sales aws ON wf.product = aws.product
+WHERE cs.current_stock > 0 AND aws.avg_weekly_sales > 0  -- Must have both stock and sales
+ORDER BY risk_priority ASC, wf.wdd_uplift_pct DESC
 LIMIT 30;
+```
+
+**Q12 Context - Weather Impact + Stockout Risk**:
+- **Goal**: Identify products needing replenishment to avoid stockouts based on weather-driven demand
+- **Time Period**: Next 1-2 weeks (2025-11-15, 2025-11-22) for forecast
+- **Historical Period**: Last 4 weeks (2025-10-12 to 2025-11-08) for avg weekly sales
+- **Risk Assessment**: Weeks of Cover (WOC) = current_stock / avg_weekly_sales
+- **Output**: Product, WDD uplift %, current stock, avg sales, WOC, risk level, priority
+- **Business Value**: Prevent stockouts by identifying high-risk items needing immediate replenishment
+
+Expected Output Format:
+• Sandwiches: +268% (9,957 → 14,571 units, Q4-24 → Q1-25)
+• Soda: +214% (1,824 → 5,728 units, Q4-24 → Q1-25)
+• Bacon: +72% (4,247 → 7,312 units, Q4-24 → Q1-25)
+
+**"Perishable Products + WDD + Availability Risk" Queries (Tampa 6-Week Analysis - Q13):**
+Q: "Which perishable products had the strongest weather-driven demand over the past 6 weeks in Tampa, FL, and do any show low availability risk?"
+
+⚠️ CRITICAL - AVOID RESTRICTIVE FILTERS:
+   This query analyzes ALL perishable products in Tampa market.
+   DO NOT add specific product filters from entity resolution!
+   Let the query find all perishable products with WDD trends.
+
+⚠️ CRITICAL REQUIREMENTS:
+   1. **MUST filter perishable products only** - Use ph.category = 'Perishable' filter
+   2. **Market filter**: Tampa, FL market ONLY (l.market = 'tampa, fl')
+   3. **Time period**: Last 6-7 weeks from CURRENT DATE (2025-11-08) → Use: ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')
+   4. **WDD calculation**: Use WDD vs LY (metric vs metric_ly) for demand trends
+   5. **Weather context**: Include heatwave_flag and cold_spell_flag from weekly_weather
+   6. **Availability risk**: Calculate Weeks of Cover (WOC)
+   7. **Current inventory date**: 2025-11-08 (stock_at_week_end from batches) - DEMO DATA CURRENT DATE
+   8. **Average sales period**: 2025-09-27 to 2025-11-08 (for WOC calculation)
+   9. **Weeks of Cover (WOC)**: current_stock / avg_weekly_sales
+   10. **Risk levels**: HIGH < 1 week, MEDIUM 1-2 weeks, LOW ≥ 2 weeks
+   11. **Risk priority**: 1=HIGH, 2=MEDIUM, 3=LOW (for sorting)
+   12. **Output**: Product, category, WDD trend, weather flags, current stock, avg sales, WOC, risk level
+   13. **Sort**: Risk priority ASC (high risk first), then WDD % DESC
+   14. **DO NOT add product filters** - Show ALL perishable products with data
+
+⚠️ CRITICAL - DO NOT ADD PRODUCT FILTERS:
+   - ❌ DO NOT use: WHERE ph.product IN (...)
+   - ❌ DO NOT use: WHERE p.product_name IN (...)
+   - ✅ CORRECT: Filter by ph.category = 'Perishable' ONLY, let query find all matching products
+   - **Reason**: Goal is to discover which perishable items have strong WDD + low availability
+
+⚠️ CRITICAL DATES FOR Q13 (CORRECTED FOR DEMO DATA):
+   - **DEMO DATA CURRENT DATE**: 2025-11-08 (not 12-27!)
+   - Current inventory snapshot: 2025-11-08 (FROM batches WHERE week_end_date = '2025-11-08')
+   - Average sales calculation: 2025-09-27 to 2025-11-08 (FROM sales WHERE transaction_date BETWEEN '2025-09-27' AND '2025-11-08')
+   - Last 6-7 weeks for WDD: ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')
+   - **NOTE**: These dates are DIFFERENT from Q12 dates! Q13 uses PAST data, Q12 uses FUTURE forecast!
+
+⚠️ CRITICAL FORMULAS:
+   - **WDD vs LY %**: `ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2)`
+   - **Weeks of Cover**: `ROUND(current_stock / NULLIF(avg_weekly_sales, 0), 2)`
+   - **Risk Level**: `CASE WHEN woc < 1 THEN 'HIGH RISK' WHEN woc < 2 THEN 'MEDIUM RISK' ELSE 'LOW RISK' END`
+   - **Risk Priority**: `CASE WHEN woc < 1 THEN 1 WHEN woc < 2 THEN 2 ELSE 3 END`
+
+⚠️ PERISHABLE FILTERING:
+   - **Use**: `WHERE ph.category = 'Perishable'` in ALL CTEs
+   - This ensures only perishable products are included in analysis
+   - Apply to metrics CTE, sales CTE, and batches CTE
+
+Example SQL Template:
+```sql
+WITH wdd_trends AS (
+    -- WDD vs LY trends for last 6 weeks in Tampa for perishable products
+    SELECT 
+        ph.product,
+        ph.category,
+        ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct,
+        COUNT(DISTINCT m.end_date) AS weeks_analyzed,
+        MAX(CASE WHEN w.heatwave_flag = true THEN 1 ELSE 0 END) AS had_heatwave,
+        MAX(CASE WHEN w.cold_spell_flag = true THEN 1 ELSE 0 END) AS had_cold_spell
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    JOIN calendar c ON m.end_date = c.end_date
+    LEFT JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+    WHERE ph.category = 'Perishable'  -- ONLY perishable products
+      AND l.market = 'tampa, fl'  -- Tampa market filter
+      AND c.end_date IN ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')  -- Last 6-7 weeks (CORRECTED)
+    GROUP BY ph.product, ph.category
+    HAVING SUM(m.metric_ly) > 0  -- Must have baseline
+),
+avg_weekly_sales AS (
+    -- Average weekly sales for WOC calculation (11-15 to 12-27)
+    SELECT 
+        ph.product,
+        AVG(s.sales_units) AS avg_weekly_sales,
+        SUM(s.sales_units) AS total_sales
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN calendar c ON s.transaction_date = c.end_date
+    JOIN location l ON s.store_code = l.location
+    WHERE ph.category = 'Perishable'
+      AND l.market = 'tampa, fl'
+      AND c.end_date BETWEEN '2025-09-27' AND '2025-11-08'  -- Sales period for WOC (CORRECTED)
+    GROUP BY ph.product
+    HAVING SUM(s.sales_units) > 0
+),
+current_stock AS (
+    -- Current inventory at 12-27-2025
+    SELECT 
+        ph.product,
+        SUM(b.stock_at_week_end) AS current_stock
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    JOIN location l ON b.store_code = l.location
+    WHERE ph.category = 'Perishable'
+      AND l.market = 'tampa, fl'
+      AND b.week_end_date = '2025-11-08'  -- Current inventory date (CORRECTED)
+      AND b.stock_at_week_end > 0
+    GROUP BY ph.product
+)
+SELECT 
+    COALESCE(wt.product, aws.product, cs.product) AS product,
+    COALESCE(wt.category, 'Perishable') AS category,
+    wt.wdd_vs_ly_pct,
+    wt.weeks_analyzed,
+    CASE WHEN wt.had_heatwave = 1 THEN 'Yes' ELSE 'No' END AS heatwave_present,
+    CASE WHEN wt.had_cold_spell = 1 THEN 'Yes' ELSE 'No' END AS cold_spell_present,
+    cs.current_stock,
+    aws.avg_weekly_sales,
+    ROUND(cs.current_stock / NULLIF(aws.avg_weekly_sales, 0), 2) AS weeks_of_cover,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 'HIGH RISK'
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 'MEDIUM RISK'
+        ELSE 'LOW RISK'
+    END AS availability_risk,
+    CASE 
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 1 THEN 1
+        WHEN cs.current_stock / NULLIF(aws.avg_weekly_sales, 0) < 2 THEN 2
+        ELSE 3
+    END AS risk_priority
+FROM wdd_trends wt
+LEFT JOIN current_stock cs ON wt.product = cs.product
+LEFT JOIN avg_weekly_sales aws ON wt.product = aws.product
+WHERE cs.current_stock > 0 AND aws.avg_weekly_sales > 0  -- Only products with inventory and sales
+ORDER BY risk_priority ASC, wt.wdd_vs_ly_pct DESC  -- High risk first, then strongest WDD
+LIMIT 30;
+```
+
+Expected Output Columns:
+- product: Product name (e.g., "Salad Kits", "Ice Cream", "Milk")
+- category: Should be 'Perishable'
+- wdd_vs_ly_pct: WDD vs Last Year % (e.g., 45.23%)
+- weeks_analyzed: Number of weeks with data (should be ≤6)
+- heatwave_present: 'Yes' if any week had heatwave
+- cold_spell_present: 'Yes' if any week had cold spell
+- current_stock: Units on hand at 12-27-2025
+- avg_weekly_sales: Average sales per week (11-15 to 12-27)
+- weeks_of_cover: Current stock / avg weekly sales (e.g., 1.5)
+- availability_risk: 'HIGH RISK' / 'MEDIUM RISK' / 'LOW RISK'
+- risk_priority: 1 / 2 / 3
+
+**Q13 Context - Tampa Perishables + Availability Risk**:
+- **Goal**: Identify perishable products with strong WDD and assess stockout risk
+- **Location**: Tampa, FL market only
+- **Time Period**: Last 6 weeks (11-15 to 12-27-2025)
+- **Product Filter**: Perishable category only
+- **Weather Context**: Track heatwave and cold spell flags
+- **Risk Assessment**: Weeks of Cover (WOC) = current_stock / avg_weekly_sales
+- **Business Value**: Prioritize perishable replenishment based on weather-driven demand + risk
 
 **"Heatwave Impact on Perishables + Shrinkage Risk" Queries:**
 Q: "Sudden heatwave in San Francisco. How could this impact perishable products and shrinkage risk?"
@@ -1638,14 +2019,67 @@ Use these when user asks about: stockout risk, overstock analysis, inventory tur
    FROM calendar c
    JOIN weekly_weather ww ON c.end_date = ww.week_end_date
    WHERE EXTRACT(DOW FROM c.end_date) = 6  -- Saturday = 6
-     AND ww.tmax BETWEEN 80 AND 95
-     AND ww.tmin >= 70  -- Comfortable minimum
-     AND ww.percin <= 0.1
-     AND ww.heavy_rain = false
-     AND ww.cold_spell = false
-     AND ww.snow = false
-     AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'  -- Last 2 years
-   ORDER BY c.end_date;
+     AND ww.tmax_f BETWEEN 80 AND 95
+     AND ww.tmin_f >= 70  -- Comfortable minimum
+     AND ww.precip_in <= 0.1  -- Minimal rain (inches)
+     AND ww.heatwave_flag = false
+     AND ww.cold_spell_flag = false
+     AND ww.heavy_rain_flag = false
+     AND ww.snow_flag = false;
+
+⚠️ CRITICAL: Beach Weather Food Diversification Query Pattern (e.g., "How should food options be diversified for peak weekend sales driven by ideal beach weather in Miami?")
+
+WHEN USER ASKS: "diversify", "diversification", "beach weather", "ideal beach", "peak weekend sales"
+
+MUST DO:
+1. **Use METRICS table** (NOT sales table!) for WDD vs LY analysis
+2. **Calculate WDD vs LY percentage**: (SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100
+3. **Filter 2 years historical data**: c.end_date BETWEEN '2023-11-08' AND '2025-11-08'
+4. **Filter Saturday weekends**: EXTRACT(DOW FROM c.end_date) = 6
+5. **Apply ideal beach weather conditions**:
+   - w.tmax_f BETWEEN 80 AND 95  -- Fahrenheit
+   - w.tmin_f >= 70
+   - w.precip_in <= 0.1  -- inches
+   - w.heatwave_flag = false AND w.cold_spell_flag = false
+   - w.heavy_rain_flag = false AND w.snow_flag = false
+6. **Join pattern**: metrics → product_hierarchy → location → calendar → weekly_weather
+7. **Group by**: ph.product, ph.category
+8. **Order by**: wdd_vs_ly_pct DESC
+
+CORRECT QUERY TEMPLATE:
+```sql
+SELECT 
+    ph.product,
+    COALESCE(ph.category, 'General') AS category,
+    COALESCE(ph.dept, 'General') AS dept,
+    ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct,
+    COUNT(DISTINCT m.end_date) AS num_ideal_weekends
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN location l ON m.location = l.location
+JOIN calendar c ON m.end_date = c.end_date
+JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+WHERE l.market ILIKE '%miami%'
+  AND EXTRACT(DOW FROM c.end_date) = 6
+  AND c.end_date BETWEEN '2023-11-08' AND '2025-11-08'
+  AND w.tmax_f BETWEEN 80 AND 95
+  AND w.tmin_f >= 70
+  AND w.precip_in <= 0.1
+  AND w.heatwave_flag = false AND w.cold_spell_flag = false
+  AND w.heavy_rain_flag = false AND w.snow_flag = false
+GROUP BY ph.product, ph.category, ph.dept
+HAVING SUM(m.metric_ly) > 0
+ORDER BY wdd_vs_ly_pct DESC
+LIMIT 30;
+```
+
+❌ WRONG PATTERNS TO AVOID:
+- Using sales table instead of metrics table
+- Missing date range filter (2 years historical)
+- Using current week data only
+- Not filtering for Saturday (DOW = 6)
+- Missing weather condition filters
+- Using revenue calculations instead of WDD percentage
 
 **13. Quarter-on-Quarter (QoQ) Sales Comparison**:
    Purpose: Compare sales performance across quarters to identify spikes
