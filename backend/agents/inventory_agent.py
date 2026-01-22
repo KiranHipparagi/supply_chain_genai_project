@@ -37,9 +37,9 @@ class InventoryAgent:
         "overstock", "stockout", "out of stock",
         "received", "transfer", "movement", "tracking",
         "current stock", "stock level", "stock at",
-        "shrinkage", "shrink", "risk of shrinkage",  # Added for Q4-type queries
-        "replenishment", "replenish", "avoid stockout", "prevent stockout",  # Added for Q12-type queries
-        "weeks of cover", "woc", "inventory risk"  # Added for Q12-type queries
+        "shrinkage", "shrink", "risk of shrinkage",  
+        "replenishment", "replenish", "avoid stockout", "prevent stockout",  
+        "weeks of cover", "woc", "inventory risk"  
     ]
     
     def __init__(self):
@@ -191,7 +191,7 @@ AS shelf_life_risk_value
                 "description": "Spoilage quantity and percentage"
             })
         
-        # STOCKOUT RISK / WEEKS OF COVER - Q12 Type Query
+        # STOCKOUT RISK / WEEKS OF COVER 
         if any(word in query_lower for word in ["stockout", "replenishment", "avoid stockout", "prevent stockout", "weeks of cover", "woc"]):
             hints["formulas"].append({
                 "name": "Weeks of Cover (WOC) + Stockout Risk",
@@ -245,7 +245,7 @@ ORDER BY risk_priority ASC;
                 "when_to_use": "For queries asking about replenishment needs, stockout prevention, or inventory adequacy"
             })
         
-        # Q13: Tampa Perishable WDD + Availability Risk (6 weeks)
+        # Tampa Perishable WDD + Availability Risk (6 weeks)
         if any(word in query_lower for word in ["tampa", "perishable", "strongest wdd", "low availability", "availability risk"]) and \
            any(word in query_lower for word in ["6 weeks", "six weeks", "past 6", "last 6"]):
             hints["formulas"].append({
@@ -315,7 +315,7 @@ ORDER BY risk_priority ASC, wt.wdd_vs_ly_pct DESC;
                 "when_to_use": "For Tampa perishable WDD analysis with availability risk (6-week period)"
             })
         
-        # SHRINKAGE RISK - Q4 Type Query (heatwave + perishable + shrinkage)
+        # SHRINKAGE RISK (heatwave + perishable + shrinkage)
         # This is CRITICAL for questions about "risk of shrinkage if we increase display"
         if any(word in query_lower for word in ["shrinkage", "shrink", "risk of shrinkage", "increase display", "meet demand", "perishable"]):
             hints["formulas"].append({
@@ -422,7 +422,7 @@ SUM(CASE WHEN bst.quantity < 0 THEN ABS(bst.quantity) ELSE 0 END) AS qty_out
                 "requires_groupby": "GROUP BY bst.transaction_type"
             })
         
-        # Weeks of Cover (NEW - Testing Requirement)
+        # Weeks of Cover 
         if any(word in query_lower for word in ["weeks of cover", "woc", "inventory duration", "how long", "risk level", "risk assessment", "availability risk", "low availability"]):
             hints["formulas"].append({
                 "name": "Weeks of Cover (WOC) - Inventory Risk Assessment",

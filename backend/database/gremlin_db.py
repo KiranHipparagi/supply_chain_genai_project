@@ -17,8 +17,6 @@ class GremlinConnection:
             return
 
         try:
-            # Get endpoint from settings (same as build_planalytics_gremlin_async.py)
-            # COSMOS_ENDPOINT is just the host: your-cosmos-account.gremlin.cosmos.azure.com
             endpoint = settings.COSMOS_ENDPOINT
             cosmos_key = settings.COSMOS_KEY
             cosmos_database = settings.COSMOS_DATABASE
@@ -117,7 +115,7 @@ class GremlinConnection:
         if not self.ensure_connected() or not product_ids:
             return []
         
-        # Convert Azure Search IDs (PROD_1 â†’ P_1) to match graph structure
+        # Convert Azure Search IDs (PROD_1  P_1) to match graph structure
         gremlin_ids = []
         for pid in product_ids:
             try:
@@ -134,7 +132,7 @@ class GremlinConnection:
             return []
         
         try:
-            # Build query: Find products â†’ traverse to category â†’ find other products in same category
+            # Build query: Find products  traverse to category  find other products in same category
             ids_str = "', '".join(gremlin_ids)
             query = f"""g.V().hasLabel('Product').has('id', within('{ids_str}'))
                 .out('IN_CATEGORY').as('c')
@@ -154,7 +152,7 @@ class GremlinConnection:
             return []
         
         try:
-            # Build query: Find stores â†’ traverse to market â†’ find other stores in same market
+            # Build query: Find stores  traverse to market  find other stores in same market
             ids_str = "', '".join(location_ids)
             query = f"""g.V().hasLabel('Store').has('id', within('{ids_str}'))
                 .out('IN_MARKET').as('m')

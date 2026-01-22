@@ -189,7 +189,7 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
             ]
         }
         
-        # CRITICAL: Seasonal Planning Query Guidance (Q6, Q7, Q8, Q9)
+        # CRITICAL: Seasonal Planning Query Guidance
         if any(word in query_lower for word in ["spring", "summer", "fall", "winter", "season", "seasonal"]):
             hints["seasonal_guidance"] = {
                 "critical_rules": [
@@ -215,7 +215,7 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
                 "grouping_note": "Do NOT group by c.month unless explicitly asked - group by season or region"
             }
         
-        # CRITICAL: Restaurant Sector Queries (Q10)
+        # CRITICAL: Restaurant Sector Queries
         if any(word in query_lower for word in ["restaurant", "qsr"]):
             hints["restaurant_guidance"] = {
                 "sector_filter": "ph.product = 'Restaurant Sector' (NOT ph.category = 'QSR'!)",
@@ -238,7 +238,7 @@ LEFT JOIN weekly_weather w ON m.location = w.store_id AND m.end_date = w.week_en
             "explanation": "NULL values indicate sector-level or aggregate products without detailed hierarchy - this is VALID, do not filter them out"
         }
         
-        # CRITICAL: Beach Weather Food Diversification Queries (Q1)
+        # CRITICAL: Beach Weather Food Diversification Queries
         if any(word in query_lower for word in ["beach weather", "ideal beach", "diversify", "diversification", "peak weekend"]):
             hints["beach_weather_guidance"] = {
                 "critical_table": "MUST use metrics table (NOT sales table!) for WDD vs LY calculation",
@@ -271,7 +271,7 @@ GROUP BY ph.product, ph.category
 ORDER BY wdd_vs_ly_pct DESC"""
             }
         
-        # CRITICAL: Weather Impact + Stockout Risk Queries (Q12)
+        # CRITICAL: Weather Impact + Stockout Risk Queries
         if any(word in query_lower for word in ["stockout", "stock out", "replenishment", "avoid stockout", "prevent stockout"]):
             hints["stockout_risk_guidance"] = {
                 "critical_tables": "MUST use THREE tables: metrics (WDD), sales (avg weekly sales), batches (current stock)",
@@ -301,7 +301,7 @@ ORDER BY wdd_vs_ly_pct DESC"""
                 "business_context": "Identify products with high demand forecast but low inventory to prevent stockouts"
             }
         
-        # CRITICAL: Perishable Products + WDD + Availability Risk (Q13 - Tampa)
+        # CRITICAL: Perishable Products + WDD + Availability Risk
         if any(word in query_lower for word in ["perishable", "strongest wdd", "strongest weather", "low availability", "tampa"]) and \
            any(word in query_lower for word in ["6 weeks", "six weeks", "past 6", "last 6"]):
             hints["tampa_perishable_risk_guidance"] = {
@@ -376,7 +376,6 @@ ORDER BY wdd_vs_ly_pct DESC"""
             })
         
         # CRITICAL: Recommended Order / Adjusted Qty formula
-        # This is the testing team's official formula for Q5 and similar queries
         if any(word in query_lower for word in ["recommend", "order", "reorder", "procurement", "adjusted qty", "ordering volume", "should order", "how much to order", "prevent waste", "adjust ordering", "next seven days", "next week", "coming week"]):
             hints["formulas"].append({
                 "name": "Recommended Order / Adjusted Qty (Q5 Type)",
@@ -421,7 +420,7 @@ ORDER BY recommended_order_qty DESC
                 "critical_for": "Q5 - Tampa perishable ordering volume"
             })
             
-            # ADDITIONAL: Shelf Life Risk for "prevent waste" or "shrinkage" queries (Q3, Q4 type)
+            # ADDITIONAL: Shelf Life Risk for "prevent waste" or "shrinkage" queries 
             if any(word in query_lower for word in ["prevent waste", "adjust ordering", "waste", "perishable", "expir", "shelf life", "shrinkage", "shrink", "increase display", "meet demand"]):
                 hints["formulas"].append({
                     "name": "Shelf Life Risk + Daily Sales Velocity (Waste/Shrinkage Prevention)",
@@ -515,7 +514,7 @@ CASE WHEN w.heatwave_flag THEN 'Heatwave'
         - FUTURE (≤4 weeks ahead): Use metric vs metric_nrm
         - PAST (historical, YoY, >4 weeks): Use metric vs metric_ly
         """
-        # Static dates for demo (Nov 8, 2025 is current)
+        #(Nov 8, 2025 is current)
         context = {
             "comparison_type": "future",  # Default to future
             "current_week_end": "2025-11-08",

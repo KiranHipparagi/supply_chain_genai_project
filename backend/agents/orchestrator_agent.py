@@ -17,9 +17,9 @@ from .weather_agent import WeatherAgent
 from .events_agent import EventsAgent
 from .location_agent import LocationAgent
 from .inventory_agent import InventoryAgent
-from .visualization_agent import VisualizationAgent  # LLM-powered visualization
-from .sales_agent import SalesAgent  # NEW: Dedicated sales agent
-from .metrics_agent import MetricsAgent  # NEW: Dedicated WDD/metrics agent
+from .visualization_agent import VisualizationAgent  
+from .sales_agent import SalesAgent  
+from .metrics_agent import MetricsAgent  
 import json
 import operator
 
@@ -74,8 +74,8 @@ class OrchestratorAgent:
         self.events_agent = EventsAgent()
         self.location_agent = LocationAgent()
         self.inventory_agent = InventoryAgent()
-        self.sales_agent = SalesAgent()  # NEW: Dedicated sales agent
-        self.metrics_agent = MetricsAgent()  # NEW: Dedicated WDD/metrics agent
+        self.sales_agent = SalesAgent()  
+        self.metrics_agent = MetricsAgent()  
         
         # LLM-powered visualization agent
         self.visualization_agent = VisualizationAgent()

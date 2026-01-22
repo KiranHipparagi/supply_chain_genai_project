@@ -157,7 +157,7 @@ SUM(CASE WHEN w.snow_flag THEN 1 ELSE 0 END) AS snow_count
         if any(word in query_lower for word in ["beach", "ideal", "miami", "coastal", "summer", "weekend"]):
             hints["formulas"].append({
                 "name": "Ideal Beach Weather Filter",
-                "sql": "w.tmax BETWEEN 80 AND 95 AND w.tmin >= 65 AND w.precip <= 0.1 AND w.heatwave_flag = false AND w.cold_spell_flag = false AND w.heavy_rain_flag = false AND w.snow_flag = false",
+                "sql": "w.tmax_f BETWEEN 80 AND 95 AND w.tmin_f >= 65 AND w.precip_in <= 0.1 AND w.heatwave_flag = false AND w.cold_spell_flag = false AND w.heavy_rain_flag = false AND w.snow_flag = false",
                 "description": "Filter for ideal beach weather conditions (80-95°F, ≤0.1\" rain, no adverse flags)",
                 "use_as": "WHERE clause condition"
             })

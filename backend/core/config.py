@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     
     # Azure Cosmos DB Gremlin Configuration (Knowledge Graph)
     # Uses the same variable names as build_planalytics_gremlin_async.py
-    COSMOS_ENDPOINT: Optional[str] = None  # Just the host: your-cosmos-account.gremlin.cosmos.azure.com
+    COSMOS_ENDPOINT: Optional[str] = None  
     COSMOS_KEY: Optional[str] = None
     COSMOS_DATABASE: str = "supply-chain-kg"
     COSMOS_GRAPH: str = "knowledge_graph_updated"
@@ -56,11 +56,6 @@ class Settings(BaseSettings):
     AZURE_SEARCH_ENDPOINT: str
     AZURE_SEARCH_KEY: str
     
-    # Redis Cache (Optional)
-    REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
-    REDIS_DB: int = 0
-    CACHE_TTL: int = 3600
     
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60

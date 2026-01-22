@@ -1529,7 +1529,7 @@ Q: "What is the recommended ordering volume for perishables in Tampa considering
 Q: "What should we order for next week considering weather?"
 Q: "Recommend ordering quantity for perishables"
 
-⚠️ CRITICAL FORMULA (from Testing Team) - DO NOT USE metric_nrm OR metric_ly AS BASELINE!
+⚠️ CRITICAL FORMULA - DO NOT USE metric_nrm OR metric_ly AS BASELINE!
 ===================================================================================
 Adjusted Qty = Last-week ACTUAL sales × (1 + WDD %)
 

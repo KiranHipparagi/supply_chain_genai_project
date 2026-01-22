@@ -285,7 +285,7 @@ The detailed schema, examples, and domain hints are provided in the user prompt 
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=1500  # Increased for complex multi-CTE queries (was 500)
+            max_tokens=1500  
         )
         
         sql_query = response.choices[0].message.content.strip()

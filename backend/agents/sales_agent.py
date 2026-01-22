@@ -180,7 +180,7 @@ JOIN previous_week prev ON curr.{dimension} = prev.{dimension}
         if any(word in query_lower for word in ["bottom", "lowest", "worst"]):
             hints["aggregation_hints"].append("ORDER BY revenue ASC LIMIT 10")
         
-        # Q2-type queries: Sales anomaly without weather/event
+        # type queries: Sales anomaly without weather/event
         if any(word in query_lower for word in ["rise in sales", "sales increase", "without weather", "no weather", "no event", "anomaly"]):
             hints["anomaly_detection_guidance"] = {
                 "critical_table": "SALES table (NOT metrics!) - need actual sales_units, revenue, transactions",
