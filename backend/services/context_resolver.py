@@ -688,10 +688,13 @@ PRODUCT_HIERARCHY TABLE (CRITICAL - Supports 3-level hierarchy filtering):
   Some products have NULL category or dept values - these are VALID sector-level or aggregate products:
   - Examples: 'Restaurant Sector', 'Grocery Sector', 'Home Improvement Sect.', 'Total Fleece', 'Total Shorts', 'Total Boots'
   - These represent sector-level aggregates without detailed hierarchy
-  - When selecting category/dept in results: Use COALESCE(ph.category, 'General') AS category
+  - **CRITICAL - Display product name instead of NULL**:
+    ✅ CORRECT: SELECT COALESCE(ph.category, ph.product) AS category_display
+    ✅ CORRECT: SELECT COALESCE(ph.dept, ph.product) AS dept_display
+    ❌ WRONG: SELECT ph.category (shows NULL for sector-level products)
   - Always include in GROUP BY: GROUP BY ph.product, ph.category, ph.dept (even if NULL)
   - DO NOT filter out NULL values - they are valid and indicate general/sector-level products
-  - In explanations, clarify that NULL category means "sector-level or general product"
+  - User-friendly display: When category/dept is NULL, show the product name instead (e.g., 'Restaurant Sector' instead of NULL)
 
 PERISHABLE TABLE (Extended perishable product details):
 - perishable (id, product, perishable_id, min_period, max_period, period_metric, storage)
@@ -817,8 +820,8 @@ EXAMPLES:
 
 SEASONS: Spring=Feb/Mar/Apr, Summer=May/Jun/Jul, Fall=Aug/Sep/Oct, Winter=Nov/Dec/Jan
 
-⚠️ CRITICAL - SEASONAL QUERIES (Q6, Q7, Q8, Q9):
-==================================================
+⚠️ CRITICAL - SEASONAL QUERIES:
+================================
 TEMPORAL MAPPING (Current date: November 8, 2025):
 - "last spring" = Spring 2025 (Feb/Mar/Apr 2025) → HISTORICAL, c.year = 2025, m.end_date <= '2025-11-08'
 - "coming spring" = Spring 2026 (Feb/Mar/Apr 2026) → FUTURE, c.year = 2026, m.end_date >= '2025-11-09'
@@ -929,19 +932,28 @@ Q: "Which markets had the most favorable weather impacts on restaurant traffic t
    WHERE c.season = 'Fall' AND c.year = 2025
 
 Q: "Based on the weather, what grocery products had the best year-over-year performance last quarter?"
-→ Use: metrics (WDD trends) + sales (actual performance)
-→ Filter by positive WDD impact, rank by sales YoY growth
-→ Example SQL:
-   SELECT 
-       ph.product,
-       SUM(s.sales_units) as current_qtr_units,
-       SUM(s_ly.sales_units) as last_year_qtr_units,
-       ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) as wdd_impact_pct
-   FROM sales s
-   JOIN metrics m ON m.product = ph.product AND m.location = s.store_code
-   JOIN product_hierarchy ph ON s.product_code = ph.product_id
-   WHERE ph.dept = 'Grocery' AND wdd_impact_pct > 0
-   ORDER BY (current_qtr_units - last_year_qtr_units) DESC
+→ Use: metrics (WDD vs LY for weather impact) - SIMPLER approach works better!
+→ Filter by dept = 'Grocery', quarter = 3 (last completed quarter)
+→ WDD vs LY shows year-over-year WEATHER impact directly from metrics
+→ AVOID complex sales JOINs with last-year calculations - they often return 0 rows!
+
+⚠️ PATTERN - Grocery Year-over-Year Performance:
+```sql
+SELECT 
+    ph.product,
+    ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS yoy_wdd_pct
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN calendar c ON m.end_date = c.end_date
+WHERE ph.dept = 'Grocery'
+  AND c.quarter = 3  -- Last completed quarter (Q3)
+  AND c.year = 2025
+GROUP BY ph.product
+HAVING SUM(m.metric_ly) > 0
+ORDER BY yoy_wdd_pct DESC
+LIMIT 30;
+```
+This is SIMPLER and more reliable than complex sales JOINs!
 
 Q: "Considering the impact of weather last spring, how should we plan for allergy relief this coming spring?"
 → Use: metrics (WDD trends with metric_ly for year-over-year comparison)
@@ -970,6 +982,24 @@ Q: "Considering the impact of weather last spring, how should we plan for allerg
 Q: "What is the weather-driven demand forecast for ice cream?"
 → Use: metrics table only (trend analysis)
 → No sales join needed
+
+Q: "Show me all categories with positive weather impact next month"
+→ Use: metrics table, GROUP BY category
+→ **CRITICAL - Handle NULL category display**:
+   ✅ CORRECT: SELECT COALESCE(ph.category, ph.product) AS category_name
+   This shows product name for sector-level products (e.g., 'Restaurant Sector' instead of NULL)
+→ Example SQL:
+   SELECT 
+       COALESCE(ph.category, ph.product) AS category_name,
+       ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_pct
+   FROM metrics m
+   JOIN product_hierarchy ph ON m.product = ph.product
+   JOIN calendar c ON m.end_date = c.end_date
+   WHERE c.month = 'December' AND c.year = 2025
+   GROUP BY ph.category, ph.product
+   HAVING SUM(m.metric_nrm) > 0 AND (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) > 0
+   ORDER BY wdd_pct DESC
+   LIMIT 30;
 
 **TYPE 6 - EVENT-BASED** (Use events + sales):
 Q: "Which Non-Perishable products sold the most during the Los Angeles Lakers VS Golden State Warriors game week?"
@@ -1010,6 +1040,58 @@ Q: "Which Non-Perishable products sold the most during the Los Angeles Lakers VS
   ✅ CORRECT: "demand for tomatoes, lettuce" → WHERE ph.product IN ('Tomatoes', 'Lettuce')
   ❌ WRONG: WHERE ph.category = 'Perishable' (returns 8 products instead of 2!)
 
+🚨 CRITICAL - MULTI-PRODUCT SALES + WEATHER IMPACT QUERIES:
+When user asks: "[Product] sales were down... how much was due to weather AND how were [related products] impacted?"
+- Example: "Sandwich sales were down. How much was due to weather and how was demand for tomatoes, lettuce also impacted?"
+- MUST get sales AND wdd_impact for EACH product separately, not just the main product!
+- DO NOT use LEFT JOIN that only matches one product - this causes NULL for other products!
+
+✅ CORRECT PATTERN - Get sales for EACH product:
+```sql
+WITH product_sales AS (
+    -- Get actual sales for ALL mentioned products (not just Sandwiches!)
+    SELECT 
+        ph.product,
+        SUM(s.sales_units) AS actual_units,
+        SUM(s.sales_units * s.total_amount) AS actual_revenue
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    JOIN calendar c ON s.transaction_date = c.end_date
+    WHERE ph.product IN ('Sandwiches', 'Tomatoes', 'Lettuce')  -- ALL products!
+      AND l.region = 'southeast'
+      AND c.month = 'October' AND c.year = 2025
+    GROUP BY ph.product
+),
+wdd_impact AS (
+    SELECT 
+        ph.product,
+        ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_change_pct
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    JOIN calendar c ON m.end_date = c.end_date
+    WHERE ph.product IN ('Sandwiches', 'Tomatoes', 'Lettuce')
+      AND l.region = 'southeast'
+      AND c.month = 'October' AND c.year = 2025
+    GROUP BY ph.product
+)
+SELECT 
+    ps.product,
+    ps.actual_units,
+    ps.actual_revenue,
+    wi.wdd_change_pct AS weather_impact_pct
+FROM product_sales ps
+LEFT JOIN wdd_impact wi ON ps.product = wi.product  -- JOIN on SAME product!
+ORDER BY ps.product;
+```
+
+❌ WRONG PATTERN - Causes NULL for non-matching products:
+```sql
+-- This causes NULL for Tomatoes/Lettuce because they don't match 'Sandwiches'!
+LEFT JOIN sandwich_sales ss ON wi.product = 'Sandwiches'  -- WRONG!
+```
+
 CRITICAL - REVENUE CALCULATION:
 - Total Sale Units = SUM(sales_units)
 - Revenues = SUM(sales_units * total_amount)  ← ALWAYS USE THIS FORMULA!
@@ -1017,7 +1099,7 @@ CRITICAL - REVENUE CALCULATION:
 - Example: SELECT product, SUM(sales_units) as units, SUM(sales_units * total_amount) as revenue FROM sales...
 
 🚨 CRITICAL - WEATHER FLAG FILTERING:
-- When user mentions "heatwave", "heat wave", or "hot weather" → MUST filter: WHERE heatwave_flag = true
+- When user mentions "heatwave", "heat wave", "hot weather", "extremely warm", "warm weather" → MUST filter: WHERE heatwave_flag = true
 - When user mentions "cold spell", "cold weather", "freezing" → MUST filter: WHERE cold_spell_flag = true  
 - When user mentions "heavy rain", "rainy", "precipitation" → MUST filter: WHERE heavy_rain_flag = true
 - When user mentions "snow", "snowy" → MUST filter: WHERE snow_flag = true
@@ -1027,6 +1109,35 @@ CRITICAL - REVENUE CALCULATION:
 - Example CORRECT: JOIN weekly_weather w ON w.week_end_date = c.end_date ✅
 - Example CORRECT: "heatwave impact" → WHERE w.heatwave_flag = true ✅
 
+🚨 CRITICAL - "FORECASTED" or "NEXT WEEK" Weather Queries:
+- "Forecasted heatwave" or "expected warm weather next week" → Use SINGLE date: end_date = '2025-11-15' (next week)
+- DO NOT use >= '2025-11-08' which returns ALL future weeks!
+- "This weekend warm" → end_date = '2025-11-08' (current week)
+- "Next week heatwave" → end_date = '2025-11-15' (next week only)
+- Example WRONG: WHERE c.end_date >= '2025-11-08' AND w.heatwave_flag = true ❌ (returns all future weeks!)
+- Example CORRECT: WHERE c.end_date = '2025-11-15' AND w.heatwave_flag = true ✅ (next week only)
+
+⚠️ PATTERN - Category + Warm/Hot Weather (QSR Example):
+Q: "This weekend is extremely warm in most markets. Which QSR products should perform strongest?"
+→ MUST join weekly_weather AND filter heatwave_flag = true!
+```sql
+SELECT 
+    ph.product,
+    ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_uplift_pct
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN location l ON m.location = l.location
+JOIN calendar c ON m.end_date = c.end_date
+JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location  -- MUST JOIN!
+WHERE ph.category = 'QSR'
+  AND c.end_date = '2025-11-08'  -- This weekend
+  AND w.heatwave_flag = true  -- CRITICAL: Filter for warm/hot weather!
+GROUP BY ph.product
+ORDER BY wdd_uplift_pct DESC
+LIMIT 30;
+```
+❌ WRONG: Missing JOIN weekly_weather and heatwave_flag filter (returns WDD for ALL weather, not just hot weather!)
+
 🚨 CRITICAL - COMPARISON QUERIES ("vs" or "compared to"):
 - When user asks "heatwave vs normal", "cold spell vs normal", "event weeks vs non-event" → Use CASE statements!
 - Calculate BOTH conditions separately in same query:
@@ -1035,6 +1146,38 @@ CRITICAL - REVENUE CALCULATION:
 - This allows direct comparison in one result set
 - Example: "Smoothies during heatwave vs normal weeks" → Use CASE to split by heatwave_flag
 - REMEMBER: JOIN weekly_weather w ON w.week_end_date = c.end_date (NOT w.end_date!)
+
+⚠️ PATTERN - Heatwave vs Normal Comparison (few-shot example):
+Q: "How did [Product] perform in [Market] during heatwave vs normal weeks?"
+→ MUST group by week_type AND show percentage difference!
+```sql
+WITH smoothies_performance AS (
+    SELECT 
+        CASE WHEN ww.heatwave_flag = true THEN 'Heatwave' ELSE 'Normal' END AS week_type,
+        SUM(s.sales_units) AS total_units_sold,
+        SUM(s.sales_units * s.total_amount) AS total_revenue,
+        COUNT(DISTINCT c.end_date) AS num_weeks
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    JOIN calendar c ON s.transaction_date = c.end_date
+    JOIN weekly_weather ww ON ww.week_end_date = c.end_date AND ww.store_id = l.location
+    WHERE ph.product = 'Smoothies'
+      AND l.market = 'charlotte, nc'
+      AND c.year = 2025
+    GROUP BY week_type
+)
+SELECT 
+    week_type,
+    total_units_sold,
+    total_revenue,
+    num_weeks,
+    ROUND(total_units_sold::NUMERIC / NULLIF(num_weeks, 0), 2) AS avg_units_per_week,
+    ROUND(total_revenue::NUMERIC / NULLIF(num_weeks, 0), 2) AS avg_revenue_per_week
+FROM smoothies_performance
+ORDER BY week_type DESC;
+```
+This shows BOTH heatwave and normal performance side-by-side for comparison!
 
 CRITICAL - ENTITY VALIDATION:
 - Valid regions ONLY: 'northeast', 'southeast', 'midwest', 'west', 'southwest' (all lowercase)
@@ -1094,28 +1237,149 @@ Q: "Our store is in Northeast expecting a cold spell. What is the decrease in de
    3. Filter by region (northeast)
    4. Calculate demand change using metric vs metric_nrm (short-term) - this shows the PERCENTAGE change
    5. For ordering recommendations: Use the WDD % to adjust ACTUAL last-week sales
+   6. **CRITICAL**: Calculate shelf life risk for perishable products to prevent waste
 
-Example SQL (WDD percentage analysis):
-SELECT ph.product, l.region,
-       ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS demand_change_pct,
-       SUM(m.metric) as forecasted_trend,
-       SUM(m.metric_nrm) as normal_trend
-FROM metrics m
-JOIN product_hierarchy ph ON m.product = ph.product
-JOIN location l ON m.location = l.location
-JOIN calendar c ON m.end_date = c.end_date
-JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
-WHERE ph.product = 'Salad Kits'  -- CRITICAL: Filter by EXACT product mentioned!
-  AND l.region = 'northeast'
-  AND w.cold_spell_flag = true
-GROUP BY ph.product, l.region
+🚨🚨 CRITICAL ERROR TO AVOID 🚨🚨:
+❌ WRONG: Querying metrics WITHOUT joining weekly_weather and filtering by cold_spell_flag
+   This returns WDD for ALL weather conditions, NOT just cold spell!
+   
+✅ CORRECT: MUST join weekly_weather AND add WHERE cold_spell_flag = true
+   Example:
+   FROM metrics m
+   JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location
+   WHERE w.cold_spell_flag = true  -- THIS IS MANDATORY!
+
+🚨 MANDATORY WEATHER FLAG FILTER:
+- "cold spell" query → MUST have: WHERE w.cold_spell_flag = true
+- "heatwave" query → MUST have: WHERE w.heatwave_flag = true  
+- "heavy rain" query → MUST have: WHERE w.heavy_rain_flag = true
+- "snow" query → MUST have: WHERE w.snow_flag = true
+
+⚠️ PATTERN - Cold Spell Impact + Shelf Life Risk (few-shot example):
+When query mentions "prevent waste", "adjust ordering", "perishable", "cold spell", or "shelf life":
+   - You MUST include the shelf_life_risk CTE with daily_velocity calculation
+   - Join with batches table to get current inventory and expiry dates
+   - Join with perishable table to get shelf_life_days
+   - Calculate days_to_expiry: expiry_date - CURRENT_DATE
+   - Calculate daily_sales_velocity: SUM(sales_units) / 28.0 (last 28 days from sales table)
+   - Calculate shelf life risk:
+     * If days_to_expiry > 0: (current_stock - (daily_velocity × days_to_expiry)) × unit_price
+     * If days_to_expiry <= 0: current_stock × unit_price (already expired)
+   - This shows how much inventory value is at risk of expiring
+   
+⚠️ COMMON ERROR: Only showing recommended_order_qty WITHOUT shelf_life_risk
+   The business question asks "how should we adjust ordering to PREVENT WASTE"
+   Waste prevention = Shelf Life Risk calculation is MANDATORY!
+
+🚨🚨🚨 MANDATORY FOR Q3-TYPE QUERIES 🚨🚨🚨
+When query mentions: "prevent waste", "adjust ordering", "perishable", "cold spell + ordering", "heatwave + ordering"
+YOU MUST GENERATE EXACTLY 4 CTEs - NOT 2, NOT 3, BUT 4:
+1. last_week_sales (from sales table)
+2. wdd_forecast (from metrics table WITH weather flag filter)
+3. daily_velocity (from sales table for last 28 days)
+4. shelf_life_risk (from batches table with expiry calculation)
+
+Final SELECT MUST show ALL columns:
+- last_week_sales
+- wdd_change_pct
+- recommended_order_qty
+- current_stock
+- avg_shelf_life_days
+- avg_days_to_expiry
+- shelf_life_risk_value
+
+DO NOT skip daily_velocity or shelf_life_risk CTEs! They are MANDATORY for waste prevention queries!
+
+CORRECT PATTERN - Cold Spell + Ordering with Shelf Life Risk:
+```sql
+WITH last_week_sales AS (
+    -- Get ACTUAL sales from sales table (NOT from metrics!)
+    SELECT ph.product, 
+           SUM(s.sales_units) AS last_week_units
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date = '2025-11-08'  -- Last week ending date (NOT a range!)
+      AND ph.product = 'Salad Kits'  -- CRITICAL: Filter by EXACT product mentioned!
+      AND l.region = 'northeast'
+    GROUP BY ph.product
+),
+wdd_forecast AS (
+    -- Get WDD percentage from metrics table for next week WITH cold spell filter
+    SELECT ph.product,
+           (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product
+    JOIN location l ON m.location = l.location
+    JOIN calendar c ON m.end_date = c.end_date
+    JOIN weekly_weather w ON w.week_end_date = c.end_date AND w.store_id = l.location  -- CRITICAL: Must join weather!
+    WHERE m.end_date = '2025-11-15'  -- Next week
+      AND ph.product = 'Salad Kits'
+      AND l.region = 'northeast'
+      AND w.cold_spell_flag = true  -- CRITICAL: Must filter by cold_spell_flag!
+    GROUP BY ph.product
+),
+daily_velocity AS (
+    -- Calculate daily sales velocity (last 28 days)
+    SELECT ph.product,
+           SUM(s.sales_units) / 28.0 AS daily_sales_velocity
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date >= CURRENT_DATE - INTERVAL '28 days'
+      AND ph.product = 'Salad Kits'
+      AND l.region = 'northeast'
+    GROUP BY ph.product
+),
+shelf_life_risk AS (
+    -- Calculate shelf life risk for current inventory
+    SELECT ph.product,
+           SUM(b.stock_at_week_end) AS current_stock,
+           AVG(b.unit_price) AS avg_unit_price,
+           AVG(CAST(p.max_period AS INTEGER)) AS avg_shelf_life_days,  -- CAST max_period to INTEGER!
+           AVG(b.expiry_date - CURRENT_DATE) AS avg_days_to_expiry,
+           SUM(
+               CASE 
+                   WHEN b.expiry_date - CURRENT_DATE > 0 
+                   THEN GREATEST(0, (b.stock_at_week_end - (dv.daily_sales_velocity * (b.expiry_date - CURRENT_DATE))) * b.unit_price)
+                   ELSE b.stock_at_week_end * b.unit_price  -- Already expired
+               END
+           ) AS total_shelf_life_risk
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    JOIN location l ON b.store_code = l.location
+    LEFT JOIN perishable p ON ph.product = p.product  -- Join on product NAME, not ID!
+    CROSS JOIN daily_velocity dv  -- Get daily velocity for shelf life calculation
+    WHERE b.week_end_date = '2025-11-08'  -- Current week
+      AND ph.product = 'Salad Kits'
+      AND l.region = 'northeast'
+      AND dv.product = ph.product  -- Match product from daily_velocity
+    GROUP BY ph.product
+)
+SELECT 
+    lws.product,
+    lws.last_week_units AS last_week_sales,
+    ROUND(wf.wdd_pct * 100, 2) AS wdd_change_pct,
+    ROUND(lws.last_week_units * (1 + COALESCE(wf.wdd_pct, 0)), 0) AS recommended_order_qty,
+    slr.current_stock,
+    ROUND(slr.avg_shelf_life_days, 1) AS avg_shelf_life_days,
+    ROUND(slr.avg_days_to_expiry, 1) AS avg_days_to_expiry,
+    ROUND(slr.total_shelf_life_risk, 2) AS shelf_life_risk_value
+FROM last_week_sales lws
+LEFT JOIN wdd_forecast wf ON lws.product = wf.product
+LEFT JOIN shelf_life_risk slr ON lws.product = slr.product
+ORDER BY shelf_life_risk_value DESC
 LIMIT 30;
+```
 
--- NOTE: For recommended ordering quantity, use the Adjusted Qty formula:
--- Recommended Qty = Last-week ACTUAL sales × (1 + WDD %)
+**Business Context - Cold Spell Impact**:
+- **WDD Forecast**: Shows expected demand change based on weather (cold spell reduces salad demand)
+- **Recommended Order Qty**: Adjusts last week's sales by WDD percentage
+- **Shelf Life Risk**: Shows inventory value at risk of expiring (high risk = reduce orders, low risk = normal orders)
+- **Decision Logic**: If shelf_life_risk > 0 AND wdd_pct < 0 (demand decreasing), reduce orders significantly to prevent waste
 -- Get last-week sales from sales table, NOT from metrics!
 
-**"Rise in Sales Without Weather/Event" Queries (Anomaly Detection - Q2):**
+**"Rise in Sales Without Weather/Event" Queries (Anomaly Detection Pattern):**
 Q: "Alert me to products in Columbia, SC that experienced a rise in sales but no weather or event recorded"
 
 ⚠️ CRITICAL REQUIREMENTS:
@@ -1145,7 +1409,7 @@ Q: "Alert me to products in Columbia, SC that experienced a rise in sales but no
    - **Why**: Identifies opportunities, competitive wins, or demographic shifts needing investigation
    - **8 quarters**: Provides enough history to see meaningful QoQ trends
    
-CORRECT QUERY TEMPLATE (Q2):
+CORRECT PATTERN - Unexplained Sales Anomalies:
 ```sql
 WITH quarterly_sales AS (
     SELECT ph.product,
@@ -1174,8 +1438,9 @@ weather_check AS (
 ),
 event_check AS (
     -- Check which quarters had events (events table has store_id)
+    -- IMPORTANT: Using LEFT JOIN - if no events found, quarter is still valid (had_event = false)
     SELECT c.quarter, c.year,
-           COUNT(e.event) > 0 AS had_event
+           COALESCE(COUNT(e.event), 0) > 0 AS had_event
     FROM calendar c
     CROSS JOIN location l
     LEFT JOIN events e ON e.store_id = l.location  -- events.store_id joins to location.location
@@ -1194,13 +1459,17 @@ lagged_sales AS (
     LEFT JOIN weather_check wc ON qs.quarter = wc.quarter AND qs.year = wc.year
     LEFT JOIN event_check ec ON qs.quarter = ec.quarter AND qs.year = ec.year
 )
+-- IMPORTANT: Filter for products with sales increase AND no external triggers
+-- If 0 rows, the query structure is correct but ALL quarters had weather OR events
 SELECT product,
        ROUND(((total_units - prev_quarter_units)::NUMERIC / NULLIF(prev_quarter_units, 0)) * 100, 2) AS qoq_pct,
        prev_quarter_units,
        total_units AS curr_quarter_units,
        total_revenue,
        prev_quarter_label,
-       quarter_label AS curr_quarter_label
+       quarter_label AS curr_quarter_label,
+       CASE WHEN had_weather THEN 'Yes' ELSE 'No' END AS weather_recorded,
+       CASE WHEN had_event THEN 'Yes' ELSE 'No' END AS event_recorded
 FROM lagged_sales
 WHERE prev_quarter_units IS NOT NULL
   AND total_units > prev_quarter_units  -- Only increases
@@ -1210,14 +1479,14 @@ ORDER BY qoq_pct DESC
 LIMIT 30;
 ```
 
-**Q2 Context - Unexplained Sales Anomalies**:
+**Business Context - Unexplained Sales Anomalies**:
 - **Goal**: Find products with sales increases that happened WITHOUT external factors
 - **Time Period**: Last 8 quarters (2 years) from 2023-11-08 to 2025-11-08
 - **"Unexplained" means**: No heatwave, cold spell, heavy rain, snow flags AND no events nearby
 - **Output**: Product name, QoQ %, prev → current units, prev → current quarter, revenue
 - **Business Value**: Identify opportunities or issues requiring investigation
 
-**"Weather Impact + Stockout Risk" Queries (Short-term Forecast + Inventory Risk - Q12):**
+**"Weather Impact + Stockout Risk" Queries (Replenishment Planning Pattern):**
 Q: "How could expected weather impact product demand in next 1-2 weeks, and which items need replenishment to avoid stockouts?"
 
 ⚠️ CRITICAL - AVOID RESTRICTIVE FILTERS:
@@ -1266,7 +1535,7 @@ Q: "How could expected weather impact product demand in next 1-2 weeks, and whic
    - Use COALESCE(ph.category, 'General') to show 'General' instead of NULL
    - This is NORMAL for sector-level aggregate products
 
-CORRECT QUERY TEMPLATE (Q12):
+CORRECT PATTERN - Weather Impact + Stockout Risk:
 ```sql
 WITH wdd_forecast AS (
     -- Step 1: WDD forecast for next 1-2 weeks
@@ -1334,7 +1603,7 @@ ORDER BY risk_priority ASC, wf.wdd_uplift_pct DESC
 LIMIT 30;
 ```
 
-**Q12 Context - Weather Impact + Stockout Risk**:
+**Business Context - Weather Impact + Stockout Risk**:
 - **Goal**: Identify products needing replenishment to avoid stockouts based on weather-driven demand
 - **Time Period**: Next 1-2 weeks (2025-11-15, 2025-11-22) for forecast
 - **Historical Period**: Last 4 weeks (2025-10-12 to 2025-11-08) for avg weekly sales
@@ -1347,7 +1616,44 @@ Expected Output Format:
 • Soda: +214% (1,824 → 5,728 units, Q4-24 → Q1-25)
 • Bacon: +72% (4,247 → 7,312 units, Q4-24 → Q1-25)
 
-**"Perishable Products + WDD + Availability Risk" Queries (Tampa 6-Week Analysis - Q13):**
+**"Store Categories Next Month" Queries (Specific Store - ALL Categories):**
+Q: "Which categories in my store ST9611 are likely to see higher-than-last year demand next month due to weather?"
+
+⚠️ CRITICAL - SHOW ALL CATEGORIES, NOT JUST ONE:
+   This query asks about ALL categories that might see uplift.
+   DO NOT filter to just Perishable! Show ALL categories with positive WDD.
+
+⚠️ CRITICAL REQUIREMENTS:
+   1. Filter by specific store: l.location = 'ST9611'
+   2. Filter by next month: c.month = 'December' AND c.year = 2025
+   3. Group by ph.category - NOT filtered to any specific category
+   4. Use WDD vs LY (metric vs metric_ly) for long-term planning
+   5. HAVING clause: WDD > 0 (only show positive uplift categories)
+   6. Order by wdd_vs_ly_pct DESC
+
+CORRECT PATTERN - Store Categories (few-shot example):
+```sql
+SELECT 
+    ph.category,
+    ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) AS wdd_vs_ly_pct
+FROM metrics m
+JOIN product_hierarchy ph ON m.product = ph.product
+JOIN location l ON m.location = l.location
+JOIN calendar c ON m.end_date = c.end_date
+WHERE l.location = 'ST9611'
+  AND c.month = 'December'
+  AND c.year = 2025
+GROUP BY ph.category  -- Group by ALL categories, not filtered!
+HAVING ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) > 0
+ORDER BY wdd_vs_ly_pct DESC
+LIMIT 30;
+```
+
+⚠️ COMMON ERROR:
+   ❌ WRONG: WHERE ph.category = 'Perishable'  -- Only shows 1 category!
+   ✅ CORRECT: GROUP BY ph.category  -- Shows ALL categories with positive WDD!
+
+**"Perishable Products + WDD + Availability Risk" Queries (Historical Analysis Pattern):**
 Q: "Which perishable products had the strongest weather-driven demand over the past 6 weeks in Tampa, FL, and do any show low availability risk?"
 
 ⚠️ CRITICAL - AVOID RESTRICTIVE FILTERS:
@@ -1377,12 +1683,12 @@ Q: "Which perishable products had the strongest weather-driven demand over the p
    - ✅ CORRECT: Filter by ph.category = 'Perishable' ONLY, let query find all matching products
    - **Reason**: Goal is to discover which perishable items have strong WDD + low availability
 
-⚠️ CRITICAL DATES FOR Q13 (CORRECTED FOR DEMO DATA):
-   - **DEMO DATA CURRENT DATE**: 2025-11-08 (not 12-27!)
+⚠️ CRITICAL DATES FOR HISTORICAL PERISHABLE ANALYSIS:
+   - **DEMO DATA CURRENT DATE**: 2025-11-08
    - Current inventory snapshot: 2025-11-08 (FROM batches WHERE week_end_date = '2025-11-08')
    - Average sales calculation: 2025-09-27 to 2025-11-08 (FROM sales WHERE transaction_date BETWEEN '2025-09-27' AND '2025-11-08')
    - Last 6-7 weeks for WDD: ('2025-09-27', '2025-10-04', '2025-10-11', '2025-10-18', '2025-10-25', '2025-11-01', '2025-11-08')
-   - **NOTE**: These dates are DIFFERENT from Q12 dates! Q13 uses PAST data, Q12 uses FUTURE forecast!
+   - **NOTE**: Historical analysis uses PAST data, forecast queries use FUTURE dates!
 
 ⚠️ CRITICAL FORMULAS:
    - **WDD vs LY %**: `ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2)`
@@ -1488,7 +1794,7 @@ Expected Output Columns:
 - availability_risk: 'HIGH RISK' / 'MEDIUM RISK' / 'LOW RISK'
 - risk_priority: 1 / 2 / 3
 
-**Q13 Context - Tampa Perishables + Availability Risk**:
+**Business Context - Perishables + Availability Risk**:
 - **Goal**: Identify perishable products with strong WDD and assess stockout risk
 - **Location**: Tampa, FL market only
 - **Time Period**: Last 6 weeks (11-15 to 12-27-2025)
@@ -1523,6 +1829,102 @@ GROUP BY ph.product
 ORDER BY wdd_change_pct DESC
 LIMIT 30;
 
+⚠️ PATTERN - Heatwave Impact + Shrinkage Risk (Multi-CTE):
+When calculating heatwave impact on perishables with shrinkage risk, you MUST:
+1. JOIN product_hierarchy in EVERY CTE that needs ph.category filter
+2. JOIN location in EVERY CTE that needs market/state filter
+3. Calculate daily_sales_velocity from sales table (last 28 days)
+4. Calculate shelf life risk from batches + perishable tables
+
+CORRECT PATTERN - Heatwave + Shrinkage (few-shot example):
+```sql
+WITH daily_velocity AS (
+    -- Calculate daily sales velocity for the last 28 days
+    -- MUST JOIN product_hierarchy for category filter!
+    SELECT ph.product, l.market,
+           SUM(s.sales_units) / 28.0 AS daily_sales_velocity
+    FROM sales s
+    JOIN product_hierarchy ph ON s.product_code = ph.product_id
+    JOIN location l ON s.store_code = l.location
+    WHERE s.transaction_date BETWEEN '2025-10-12' AND '2025-11-08'
+      AND l.state = 'california'  -- OR l.market ILIKE '%san francisco%'
+      AND ph.category = 'Perishable'
+    GROUP BY ph.product, l.market
+),
+current_inventory AS (
+    -- Get current inventory and shelf life for perishable products
+    -- MUST JOIN product_hierarchy for category filter!
+    SELECT ph.product, l.market,
+           SUM(b.stock_at_week_end) AS current_stock,
+           MAX(CAST(p.max_period AS INTEGER)) AS shelf_life_days,
+           AVG('2025-11-08'::date - b.transfer_in_date) AS avg_age_days
+    FROM batches b
+    JOIN product_hierarchy ph ON b.product_code = ph.product_id
+    JOIN location l ON b.store_code = l.location
+    LEFT JOIN perishable p ON ph.product = p.product
+    WHERE b.week_end_date = '2025-11-08'
+      AND l.state = 'california'
+      AND ph.category = 'Perishable'
+    GROUP BY ph.product, l.market
+),
+wdd_impact AS (
+    -- Calculate WDD impact for the next week during the heatwave
+    -- MUST JOIN product_hierarchy for category filter!
+    SELECT ph.product, l.market,
+           (SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) AS wdd_pct
+    FROM metrics m
+    JOIN product_hierarchy ph ON m.product = ph.product  -- CRITICAL: Must join here!
+    JOIN location l ON m.location = l.location
+    JOIN weekly_weather w ON w.week_end_date = m.end_date AND w.store_id = l.location
+    WHERE m.end_date = '2025-11-15'
+      AND l.state = 'california'
+      AND ph.category = 'Perishable'  -- Now this works because ph is joined!
+      AND w.heatwave_flag = true
+    GROUP BY ph.product, l.market
+)
+SELECT 
+    ci.product,
+    ci.market,
+    dv.daily_sales_velocity,
+    ci.current_stock,
+    ci.shelf_life_days,
+    ROUND(ci.shelf_life_days - ci.avg_age_days, 1) AS days_until_expiry,
+    ROUND(wi.wdd_pct * 100, 2) AS expected_demand_change_pct,
+    ROUND(dv.daily_sales_velocity * 7 * (1 + COALESCE(wi.wdd_pct, 0)), 0) AS projected_weekly_demand,
+    -- Shrinkage risk calculation
+    CASE 
+      WHEN ci.shelf_life_days - ci.avg_age_days > 0 THEN
+        GREATEST(0, ci.current_stock - (dv.daily_sales_velocity * (ci.shelf_life_days - ci.avg_age_days)))
+      ELSE ci.current_stock
+    END AS potential_shrinkage_units,
+    CASE 
+      WHEN ci.current_stock > 0 THEN
+        ROUND(GREATEST(0, ci.current_stock - (dv.daily_sales_velocity * GREATEST(0, ci.shelf_life_days - ci.avg_age_days))) / ci.current_stock * 100, 2)
+      ELSE 0
+    END AS shrinkage_risk_pct
+FROM current_inventory ci
+LEFT JOIN daily_velocity dv ON ci.product = dv.product AND ci.market = dv.market
+LEFT JOIN wdd_impact wi ON ci.product = wi.product AND ci.market = wi.market
+ORDER BY shrinkage_risk_pct DESC, expected_demand_change_pct DESC
+LIMIT 30;
+```
+
+⚠️ COMMON ERROR - Missing JOIN in CTE:
+❌ WRONG - Missing JOIN in CTE:
+   wdd_impact AS (
+       SELECT m.product, l.market, ... 
+       WHERE ph.category = 'Perishable'  -- ERROR: ph is not defined!
+   )
+
+✅ CORRECT - All tables properly joined:
+   wdd_impact AS (
+       SELECT ph.product, l.market, ...
+       FROM metrics m
+       JOIN product_hierarchy ph ON m.product = ph.product  -- ph is now defined!
+       JOIN location l ON m.location = l.location
+       WHERE ph.category = 'Perishable'  -- Now this works!
+   )
+
 **"Recommended Ordering Volume" Queries (CRITICAL - MUST USE ACTUAL SALES!):**
 ===================================================================================
 Q: "What is the recommended ordering volume for perishables in Tampa considering weather forecast?"
@@ -1538,12 +1940,12 @@ This formula MUST use:
 2. WDD percentage from metrics table (for next week) as the multiplier
 3. NEVER use metric_nrm or metric_ly as the baseline - they are TREND values, not real sales!
 
-WRONG (DO NOT DO THIS - Q5 ERROR):
+WRONG (DO NOT DO THIS - Common Error):
 ❌ metric_nrm * (1 + wdd_pct) AS recommended_order  -- WRONG! metric_nrm is NOT real sales
 ❌ SUM(m.metric_ly) * (1 + ...) AS recommended_order  -- WRONG! metric_ly is last YEAR metrics, NOT last week sales
 ❌ SUM(m.metric_nrm) * (1 + ...) AS recommended_order  -- WRONG!
 
-CORRECT (ALWAYS DO THIS FOR Q5):
+CORRECT (ALWAYS DO THIS FOR ORDERING RECOMMENDATIONS):
 ✅ last_week_sales.units * (1 + wdd_pct) AS recommended_order  -- Uses REAL sales from sales table!
 ✅ FROM sales s WHERE s.transaction_date BETWEEN '2025-11-02' AND '2025-11-08'  -- Last week ACTUAL sales
 
@@ -1592,13 +1994,30 @@ LIMIT 30;
     ❌ WHERE SUM(metric) > 100
     ❌ WHERE AVG(sales_units) > 50
     ❌ WHERE ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) > 0
+    ❌ WHERE ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) < 0  -- Common mistake!
     
     CORRECT Examples:
     ✅ HAVING SUM(metric) > 100
     ✅ HAVING AVG(sales_units) > 50
     ✅ HAVING ROUND((SUM(m.metric) - SUM(m.metric_ly)) / NULLIF(SUM(m.metric_ly), 0) * 100, 2) > 0
+    ✅ HAVING ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) < 0  -- For below-normal filters
     
     Rule: If filtering by aggregated/calculated values after GROUP BY, use HAVING not WHERE!
+    
+    REAL-WORLD EXAMPLE - Below-Normal Demand Query:
+    -- ❌ WRONG: This will cause "aggregate functions are not allowed in WHERE" error
+    SELECT l.region, ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_vs_normal_pct
+    FROM metrics m JOIN location l ON m.location = l.location
+    WHERE ph.product = 'Tomatoes' AND c.end_date = '2025-11-15'
+      AND ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) < 0  -- ERROR HERE!
+    GROUP BY l.region;
+    
+    -- ✅ CORRECT: Use HAVING clause after GROUP BY
+    SELECT l.region, ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) AS wdd_vs_normal_pct
+    FROM metrics m JOIN location l ON m.location = l.location
+    WHERE ph.product = 'Tomatoes' AND c.end_date = '2025-11-15'
+    GROUP BY l.region
+    HAVING ROUND((SUM(m.metric) - SUM(m.metric_nrm)) / NULLIF(SUM(m.metric_nrm), 0) * 100, 2) < 0  -- CORRECT!
 
 15. HANDLING MISSING CATEGORY/DEPARTMENT (CRITICAL!):
     When grouping by category or department, use COALESCE to fallback to product name:

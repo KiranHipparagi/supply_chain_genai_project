@@ -571,11 +571,6 @@ Keep responses brief and professional.
                 # Build informative zero-row response
                 zero_row_message = f"""**No data found for your query.**
 
-I executed the following SQL query on the database:
-```sql
-{sql_query}
-```
-
 **Result:** 0 rows returned.
 
 **Possible reasons:**

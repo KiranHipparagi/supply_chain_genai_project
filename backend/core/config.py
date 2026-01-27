@@ -40,11 +40,11 @@ class Settings(BaseSettings):
     COSMOS_GRAPH: str = "knowledge_graph_updated"
     COSMOS_PORT: int = 443
     
-    # Azure OpenAI (Main LLM for chat and SQL generation)
+    # Azure OpenAI (Main LLM - o3-mini for all AI tasks)
+    # Used by: database_agent, orchestrator_agent, visualization_agent
     OPENAI_ENDPOINT: str
     OPENAI_API_KEY: str
     OPENAI_MODEL_NAME: str = "o3-mini"
-    OPENAI_MODEL_4_1_NANO: str = "openai.gpt-4.1-nano"
     AZURE_OPENAI_API_VERSION: str = "2024-02-01"
     
     # Azure OpenAI Embeddings (for vector search)
